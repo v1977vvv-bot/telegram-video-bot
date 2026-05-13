@@ -1,0 +1,102 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-avatar_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-avatar_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-avatar_bot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env
+    command:
+      - sh
+      - -c
+      - >
+        python scripts/wait_for_db.py &&
+        uvicorn backend.app.main:app --host $${BACKEND_HOST:-0.0.0.0}
+        --port $${BACKEND_PORT:-8000}
+    ports:
+      - "${BACKEND_PORT:-8000}:${BACKEND_PORT:-8000}"
+    volumes:
+      - ./storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:$${BACKEND_PORT:-8000}/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    env_file:
+      - .env
+    command:
+      - sh
+      - -c
+      - python scripts/wait_for_db.py && python -m bot.app.main
+    volumes:
+      - ./storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    env_file:
+      - .env
+    command:
+      - sh
+      - -c
+      - >
+        python scripts/wait_for_db.py &&
+        celery -A worker.app.main.celery_app worker --loglevel=$${LOG_LEVEL:-INFO}
+        --concurrency=$${CELERY_WORKER_CONCURRENCY:-1}
+    volumes:
+      - ./storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:

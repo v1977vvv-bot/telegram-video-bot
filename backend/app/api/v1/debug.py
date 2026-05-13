@@ -1,0 +1,628 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Decimal
+from pathlib import Path
+from typing import Annotated, Any
+from uuid import UUID
+
+import httpx
+from fastapi import APIRouter, Depends
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.models.balance_account import BalanceAccount
+from backend.app.models.balance_transaction import BalanceTransaction
+from backend.app.models.generation_job import GenerationJob
+from backend.app.models.generation_segment import GenerationSegment
+from backend.app.models.uploaded_file import UploadedFile
+from backend.app.repositories.users import UserRepository
+from backend.app.schemas.debug import (
+    DebugAddBalanceRequest,
+    DebugBalanceLedgerResponse,
+    DebugBalanceResponse,
+    DebugComfyUIHealthResponse,
+    DebugComfyUIPatchWorkflowPreviewRequest,
+    DebugComfyUIPatchWorkflowPreviewResponse,
+    DebugComfyUIValidateWorkflowResponse,
+    DebugCreateMockJobsRequest,
+    DebugCreateMockJobsResponse,
+    DebugLedgerJobResponse,
+    DebugLedgerTransactionResponse,
+    DebugRepairFrozenBalancesResponse,
+    DebugStorageCleanupResponse,
+    DebugStorageDeleteResponse,
+    DebugStorageTestUploadRequest,
+    DebugStorageTestUploadResponse,
+    DebugTaskResponse,
+    DebugTelegramTestNotificationRequest,
+    DebugTelegramTestNotificationResponse,
+)
+from backend.app.schemas.users import BalanceResponse
+from backend.app.services.balances import BalanceService
+from backend.app.services.file_cleanup import FileCleanupService
+from backend.app.services.pricing import PricingService
+from backend.app.services.storage import StorageServiceFactory
+from backend.app.services.telegram_notify import TelegramNotificationService
+from backend.app.workers.celery_client import enqueue_debug_ping, enqueue_generation_job
+from shared.app.config import get_settings
+from shared.app.database import get_session
+from shared.app.enums import BalanceTransactionType, FileType, JobStatus, SegmentStatus
+from shared.app.exceptions import AppError
+from worker.app.services.workflow_patcher import (
+    WorkflowPatchError,
+    preview_infinite_talk_patch_values,
+    validate_infinite_talk_workflow,
+)
+
+router = APIRouter(prefix="/debug", tags=["debug"])
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
+MONEY_QUANT = Decimal("0.0001")
+
+
+@router.post("/enqueue-ping", response_model=DebugTaskResponse)
+def enqueue_ping() -> DebugTaskResponse:
+    result = enqueue_debug_ping()
+    return DebugTaskResponse(task_id=result.id, status="queued")
+
+
+@router.post("/users/{telegram_id}/add-balance", response_model=DebugBalanceResponse)
+async def add_debug_balance(
+    telegram_id: int,
+    payload: DebugAddBalanceRequest,
+    session: SessionDep,
+) -> DebugBalanceResponse:
+    settings = get_settings()
+    if settings.app_env != "local":
+        raise AppError(
+            "Debug endpoint is available only in local env", code="not_found", status_code=404
+        )
+
+    async with session.begin():
+        user = await UserRepository().get_by_telegram_id(session, telegram_id)
+        if user is None:
+            raise AppError("User not found", code="user_not_found", status_code=404)
+
+        account = await BalanceService(session).add_balance_in_transaction(
+            user_id=user.id,
+            amount_usd=payload.amount_usd,
+            reason=payload.reason,
+        )
+    return DebugBalanceResponse(
+        telegram_id=telegram_id,
+        balance=BalanceResponse(
+            available_usd=account.available_usd,
+            frozen_usd=account.frozen_usd,
+        ),
+    )
+
+
+@router.post(
+    "/users/{telegram_id}/mock-generation-jobs",
+    response_model=DebugCreateMockJobsResponse,
+)
+async def create_debug_mock_generation_jobs(
+    telegram_id: int,
+    payload: DebugCreateMockJobsRequest,
+    session: SessionDep,
+) -> DebugCreateMockJobsResponse:
+    settings = get_settings()
+    if settings.app_env != "local":
+        raise AppError(
+            "Debug endpoint is available only in local env", code="not_found", status_code=404
+        )
+
+    job_ids: list[UUID] = []
+    async with session.begin():
+        user = await UserRepository().get_by_telegram_id(session, telegram_id)
+        if user is None:
+            raise AppError("User not found", code="user_not_found", status_code=404)
+
+        duration = payload.duration_seconds.quantize(Decimal("0.001"))
+        price = PricingService(settings).calculate_job_price(duration)
+        now = datetime.now(UTC)
+        for _ in range(payload.count):
+            job = GenerationJob(
+                user_id=user.id,
+                status=JobStatus.QUEUED.value,
+                fps=settings.generation_fps,
+                width=payload.width,
+                height=payload.height,
+                audio_duration_seconds=duration,
+                segments_count=1,
+                price_usd=price,
+                confirmed_at=now,
+                queued_at=now,
+            )
+            session.add(job)
+            await session.flush()
+
+            segment = GenerationSegment(
+                job_id=job.id,
+                segment_index=1,
+                status=SegmentStatus.QUEUED.value,
+                audio_start_seconds=Decimal("0.000"),
+                audio_end_seconds=duration,
+                duration_seconds=duration,
+                frame_count=int(duration * settings.generation_fps),
+                price_usd=price,
+            )
+            session.add(segment)
+
+            await BalanceService(session).freeze_balance_in_transaction(
+                user_id=user.id,
+                amount_usd=price,
+                related_job_id=job.id,
+                reason="Local debug mock generation job",
+            )
+            job_ids.append(job.id)
+
+    for job_id in job_ids:
+        enqueue_generation_job(str(job_id))
+
+    return DebugCreateMockJobsResponse(
+        telegram_id=telegram_id,
+        job_ids=job_ids,
+        status="queued",
+    )
+
+
+@router.post(
+    "/users/{telegram_id}/repair-frozen-balances",
+    response_model=DebugRepairFrozenBalancesResponse,
+)
+async def repair_debug_frozen_balances(
+    telegram_id: int,
+    session: SessionDep,
+) -> DebugRepairFrozenBalancesResponse:
+    _require_local_env()
+
+    released_usd = Decimal("0.0000")
+    captured_usd = Decimal("0.0000")
+    repaired_job_ids: list[UUID] = []
+    async with session.begin():
+        user = await UserRepository().get_by_telegram_id(session, telegram_id)
+        if user is None:
+            raise AppError("User not found", code="user_not_found", status_code=404)
+
+        account = await _get_or_create_locked_account(session, user.id)
+        jobs = await _get_repair_candidate_jobs(session, user.id)
+        transaction_map = await _get_transactions_by_job_id(
+            session,
+            user.id,
+            [job.id for job in jobs],
+        )
+
+        for job in jobs:
+            if job.price_usd is None:
+                continue
+
+            transactions = transaction_map.get(job.id, [])
+            held = _sum_transaction_type(transactions, BalanceTransactionType.HOLD.value)
+            captured = _sum_transaction_type(transactions, BalanceTransactionType.CAPTURE.value)
+            returned = _sum_transaction_types(
+                transactions,
+                {
+                    BalanceTransactionType.REFUND.value,
+                    BalanceTransactionType.RELEASE.value,
+                },
+            )
+            unsettled = _money(held - captured - returned)
+            if unsettled <= Decimal("0"):
+                continue
+
+            if job.status == JobStatus.COMPLETED.value:
+                amount = min(unsettled, account.frozen_usd)
+                if amount <= Decimal("0"):
+                    continue
+                account.frozen_usd = _money(account.frozen_usd - amount)
+                _add_repair_transaction(
+                    session,
+                    user_id=user.id,
+                    job_id=job.id,
+                    transaction_type=BalanceTransactionType.CAPTURE.value,
+                    amount_usd=amount,
+                    account=account,
+                    reason="Local repair: capture completed generation job",
+                )
+                captured_usd = _money(captured_usd + amount)
+            elif job.status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
+                amount = min(unsettled, account.frozen_usd)
+                if amount <= Decimal("0"):
+                    continue
+                account.frozen_usd = _money(account.frozen_usd - amount)
+                account.available_usd = _money(account.available_usd + amount)
+                _add_repair_transaction(
+                    session,
+                    user_id=user.id,
+                    job_id=job.id,
+                    transaction_type=BalanceTransactionType.RELEASE.value,
+                    amount_usd=amount,
+                    account=account,
+                    reason="Local repair: release stale frozen generation funds",
+                )
+                released_usd = _money(released_usd + amount)
+            else:
+                continue
+
+            repaired_job_ids.append(job.id)
+
+    return DebugRepairFrozenBalancesResponse(
+        telegram_id=telegram_id,
+        released_usd=released_usd,
+        captured_usd=captured_usd,
+        repaired_job_ids=repaired_job_ids,
+        balance=BalanceResponse(
+            available_usd=account.available_usd,
+            frozen_usd=account.frozen_usd,
+        ),
+    )
+
+
+@router.get(
+    "/users/{telegram_id}/balance-ledger",
+    response_model=DebugBalanceLedgerResponse,
+)
+async def get_debug_balance_ledger(
+    telegram_id: int,
+    session: SessionDep,
+) -> DebugBalanceLedgerResponse:
+    _require_local_env()
+
+    user = await UserRepository().get_by_telegram_id(session, telegram_id)
+    if user is None:
+        raise AppError("User not found", code="user_not_found", status_code=404)
+
+    account_result = await session.execute(
+        select(BalanceAccount).where(BalanceAccount.user_id == user.id)
+    )
+    account = account_result.scalar_one_or_none()
+    transaction_result = await session.execute(
+        select(BalanceTransaction)
+        .where(BalanceTransaction.user_id == user.id)
+        .order_by(BalanceTransaction.created_at.desc())
+        .limit(20)
+    )
+    job_result = await session.execute(
+        select(GenerationJob)
+        .where(GenerationJob.user_id == user.id)
+        .order_by(GenerationJob.created_at.desc())
+        .limit(10)
+    )
+
+    return DebugBalanceLedgerResponse(
+        telegram_id=telegram_id,
+        balance=BalanceResponse(
+            available_usd=account.available_usd if account else Decimal("0.0000"),
+            frozen_usd=account.frozen_usd if account else Decimal("0.0000"),
+        ),
+        transactions=[
+            DebugLedgerTransactionResponse(
+                id=transaction.id,
+                type=transaction.type,
+                amount_usd=transaction.amount_usd,
+                balance_available_after=transaction.balance_available_after,
+                balance_frozen_after=transaction.balance_frozen_after,
+                reason=transaction.reason,
+                generation_job_id=transaction.generation_job_id,
+                payment_id=transaction.payment_id,
+                created_at=transaction.created_at,
+            )
+            for transaction in transaction_result.scalars()
+        ],
+        jobs=[
+            DebugLedgerJobResponse(
+                id=job.id,
+                status=job.status,
+                price_usd=job.price_usd,
+                error_message=job.error_message,
+                mock_result_message=job.mock_result_message,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+            )
+            for job in job_result.scalars()
+        ],
+    )
+
+
+@router.post("/storage/test-upload", response_model=DebugStorageTestUploadResponse)
+async def test_storage_upload(
+    payload: DebugStorageTestUploadRequest,
+    session: SessionDep,
+) -> DebugStorageTestUploadResponse:
+    _require_local_env()
+
+    async with session.begin():
+        storage = StorageServiceFactory(session).create()
+        uploaded_file = await storage.save_bytes(
+            user_id=None,
+            file_type=FileType.VIDEO,
+            original_filename="debug-storage-test.txt",
+            content=payload.content.encode(),
+            mime_type="text/plain",
+        )
+        exists = await storage.exists(uploaded_file)
+        download_url = storage.get_download_url(uploaded_file)
+
+    return DebugStorageTestUploadResponse(
+        storage_provider=uploaded_file.storage_provider,
+        file_id=uploaded_file.id,
+        storage_key=uploaded_file.storage_key,
+        download_url=download_url,
+        exists=exists,
+    )
+
+
+@router.delete("/storage/files/{file_id}", response_model=DebugStorageDeleteResponse)
+async def delete_debug_storage_file(
+    file_id: UUID,
+    session: SessionDep,
+) -> DebugStorageDeleteResponse:
+    _require_local_env()
+
+    async with session.begin():
+        result = await session.execute(select(UploadedFile).where(UploadedFile.id == file_id))
+        uploaded_file = result.scalar_one_or_none()
+        if uploaded_file is None:
+            raise AppError("File not found", code="file_not_found", status_code=404)
+
+        storage = StorageServiceFactory(session).create_for_uploaded_file(uploaded_file)
+        await storage.delete(uploaded_file)
+        await session.delete(uploaded_file)
+
+    return DebugStorageDeleteResponse(file_id=file_id, deleted=True)
+
+
+@router.post("/storage/cleanup", response_model=DebugStorageCleanupResponse)
+async def cleanup_debug_storage(session: SessionDep) -> DebugStorageCleanupResponse:
+    _require_local_env()
+
+    async with session.begin():
+        deleted_count = await FileCleanupService(session).cleanup_expired_files()
+
+    return DebugStorageCleanupResponse(deleted_count=deleted_count)
+
+
+@router.post(
+    "/telegram/test-notification",
+    response_model=DebugTelegramTestNotificationResponse,
+)
+async def send_debug_telegram_notification(
+    payload: DebugTelegramTestNotificationRequest,
+) -> DebugTelegramTestNotificationResponse:
+    _require_local_env()
+
+    ok = await TelegramNotificationService().send_message(
+        telegram_id=payload.telegram_id,
+        message=payload.message,
+    )
+    return DebugTelegramTestNotificationResponse(ok=ok)
+
+
+@router.get("/comfyui/health", response_model=DebugComfyUIHealthResponse)
+async def get_debug_comfyui_health() -> DebugComfyUIHealthResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    base_url = settings.comfyui_base_url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(
+            base_url=base_url,
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            follow_redirects=True,
+        ) as client:
+            response = await client.get("/system_stats")
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as exc:
+        raise AppError(
+            "ComfyUI healthcheck failed", code="comfyui_unavailable", status_code=502
+        ) from exc
+    except ValueError as exc:
+        raise AppError(
+            "ComfyUI returned invalid JSON", code="comfyui_invalid_response", status_code=502
+        ) from exc
+
+    summary = _extract_comfyui_health_summary(data)
+    return DebugComfyUIHealthResponse(
+        ok=True,
+        base_url=base_url,
+        device=summary.get("device"),
+        vram_free=summary.get("vram_free"),
+    )
+
+
+@router.post(
+    "/comfyui/validate-workflow",
+    response_model=DebugComfyUIValidateWorkflowResponse,
+)
+async def validate_debug_comfyui_workflow() -> DebugComfyUIValidateWorkflowResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    nodes = _load_workflow_node_values(Path(settings.comfyui_workflow_path))
+    return DebugComfyUIValidateWorkflowResponse(nodes=nodes)
+
+
+@router.post(
+    "/comfyui/patch-workflow-preview",
+    response_model=DebugComfyUIPatchWorkflowPreviewResponse,
+)
+async def preview_debug_comfyui_workflow_patch(
+    payload: DebugComfyUIPatchWorkflowPreviewRequest,
+) -> DebugComfyUIPatchWorkflowPreviewResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    try:
+        result = preview_infinite_talk_patch_values(
+            workflow_path=Path(settings.comfyui_workflow_path),
+            image_filename=payload.image_filename,
+            audio_filename=payload.audio_filename,
+            width=payload.width,
+            height=payload.height,
+            fps=payload.fps,
+            frame_count=payload.frame_count,
+            input_subfolder=settings.comfyui_input_subfolder,
+            output_subfolder=settings.comfyui_output_subfolder,
+        )
+    except FileNotFoundError as exc:
+        raise AppError(
+            "Workflow file not found", code="workflow_not_found", status_code=404
+        ) from exc
+    except (json.JSONDecodeError, WorkflowPatchError) as exc:
+        raise AppError(str(exc), code="workflow_invalid", status_code=400) from exc
+
+    return DebugComfyUIPatchWorkflowPreviewResponse(nodes=result["nodes"])
+
+
+def _require_local_env() -> None:
+    settings = get_settings()
+    if settings.app_env != "local":
+        raise AppError(
+            "Debug endpoint is available only in local env", code="not_found", status_code=404
+        )
+
+
+def _load_workflow_node_values(workflow_path: Path) -> dict[str, Any]:
+    try:
+        result = validate_infinite_talk_workflow(workflow_path)
+    except FileNotFoundError as exc:
+        raise AppError(
+            "Workflow file not found", code="workflow_not_found", status_code=404
+        ) from exc
+    except (json.JSONDecodeError, WorkflowPatchError) as exc:
+        raise AppError(str(exc), code="workflow_invalid", status_code=400) from exc
+    return result["nodes"]
+
+
+def _extract_comfyui_health_summary(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {"device": None, "vram_free": None}
+
+    devices = data.get("devices")
+    if not isinstance(devices, list) or not devices:
+        return {"device": None, "vram_free": None}
+
+    first_device = devices[0]
+    if not isinstance(first_device, dict):
+        return {"device": None, "vram_free": None}
+
+    device = first_device.get("name") or first_device.get("device_name")
+    if not isinstance(device, str):
+        device = None
+    vram_free = first_device.get("vram_free") or first_device.get("free_memory")
+    if not isinstance(vram_free, (int, float)):
+        vram_free = None
+
+    return {
+        "device": device,
+        "vram_free": vram_free,
+    }
+
+
+async def _get_or_create_locked_account(
+    session: AsyncSession,
+    user_id: UUID,
+) -> BalanceAccount:
+    await session.execute(
+        insert(BalanceAccount)
+        .values(user_id=user_id)
+        .on_conflict_do_nothing(index_elements=[BalanceAccount.user_id])
+    )
+    result = await session.execute(
+        select(BalanceAccount).where(BalanceAccount.user_id == user_id).with_for_update()
+    )
+    account = result.scalar_one_or_none()
+    if account is None:
+        raise AppError("Balance account was not created", code="balance_account_missing")
+    return account
+
+
+async def _get_repair_candidate_jobs(
+    session: AsyncSession,
+    user_id: UUID,
+) -> list[GenerationJob]:
+    result = await session.execute(
+        select(GenerationJob).where(
+            GenerationJob.user_id == user_id,
+            GenerationJob.status.in_(
+                {
+                    JobStatus.COMPLETED.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.CANCELLED.value,
+                }
+            ),
+            GenerationJob.price_usd.is_not(None),
+        )
+    )
+    return list(result.scalars())
+
+
+async def _get_transactions_by_job_id(
+    session: AsyncSession,
+    user_id: UUID,
+    job_ids: list[UUID],
+) -> dict[UUID, list[BalanceTransaction]]:
+    if not job_ids:
+        return {}
+
+    result = await session.execute(
+        select(BalanceTransaction).where(
+            BalanceTransaction.user_id == user_id,
+            BalanceTransaction.generation_job_id.in_(job_ids),
+        )
+    )
+    transactions_by_job_id: dict[UUID, list[BalanceTransaction]] = {}
+    for transaction in result.scalars():
+        if transaction.generation_job_id is None:
+            continue
+        transactions_by_job_id.setdefault(transaction.generation_job_id, []).append(transaction)
+    return transactions_by_job_id
+
+
+def _sum_transaction_type(
+    transactions: list[BalanceTransaction],
+    transaction_type: str,
+) -> Decimal:
+    return _sum_transaction_types(transactions, {transaction_type})
+
+
+def _sum_transaction_types(
+    transactions: list[BalanceTransaction],
+    transaction_types: set[str],
+) -> Decimal:
+    total = Decimal("0.0000")
+    for transaction in transactions:
+        if transaction.type in transaction_types:
+            total += abs(transaction.amount_usd)
+    return _money(total)
+
+
+def _add_repair_transaction(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    job_id: UUID,
+    transaction_type: str,
+    amount_usd: Decimal,
+    account: BalanceAccount,
+    reason: str,
+) -> None:
+    session.add(
+        BalanceTransaction(
+            user_id=user_id,
+            generation_job_id=job_id,
+            type=transaction_type,
+            amount_usd=_money(amount_usd),
+            balance_available_after=account.available_usd,
+            balance_frozen_after=account.frozen_usd,
+            reason=reason,
+        )
+    )
+
+
+def _money(amount: Decimal) -> Decimal:
+    return amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)

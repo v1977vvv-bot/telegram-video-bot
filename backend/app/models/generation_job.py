@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from decimal import Decimal
+from typing import TYPE_CHECKING
+from uuid import UUID
+
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, Text
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from backend.app.db.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from backend.app.models.generation_segment import GenerationSegment
+    from backend.app.models.user import User
+
+
+class GenerationJob(TimestampMixin, Base):
+    __tablename__ = "generation_jobs"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    source_image_file_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("uploaded_files.id", ondelete="SET NULL"),
+    )
+    source_audio_file_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("uploaded_files.id", ondelete="SET NULL"),
+    )
+    output_file_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("uploaded_files.id", ondelete="SET NULL"),
+    )
+    fps: Mapped[int] = mapped_column(Integer, nullable=False, server_default="25")
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    audio_duration_seconds: Mapped[Decimal | None] = mapped_column(Numeric(10, 3))
+    segments_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    price_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    mock_result_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped[User] = relationship("User", back_populates="generation_jobs")
+    segments: Mapped[list[GenerationSegment]] = relationship(
+        "GenerationSegment",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="GenerationSegment.segment_index",
+    )

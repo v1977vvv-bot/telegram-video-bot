@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+from backend.app.schemas.users import BalanceResponse
+
+
+class DebugTaskResponse(BaseModel):
+    task_id: str
+    status: str
+
+
+class DebugAddBalanceRequest(BaseModel):
+    amount_usd: Decimal
+    reason: str = "local test"
+
+
+class DebugBalanceResponse(BaseModel):
+    telegram_id: int
+    balance: BalanceResponse
+
+
+class DebugCreateMockJobsRequest(BaseModel):
+    count: int = Field(default=3, ge=1, le=10)
+    duration_seconds: Decimal = Field(default=Decimal("1.000"), gt=Decimal("0"))
+    width: int = 480
+    height: int = 480
+
+
+class DebugCreateMockJobsResponse(BaseModel):
+    telegram_id: int
+    job_ids: list[UUID]
+    status: str
+
+
+class DebugRepairFrozenBalancesResponse(BaseModel):
+    telegram_id: int
+    released_usd: Decimal
+    captured_usd: Decimal
+    repaired_job_ids: list[UUID]
+    balance: BalanceResponse
+
+
+class DebugLedgerTransactionResponse(BaseModel):
+    id: UUID
+    type: str
+    amount_usd: Decimal
+    balance_available_after: Decimal
+    balance_frozen_after: Decimal
+    reason: str | None
+    generation_job_id: UUID | None
+    payment_id: UUID | None
+    created_at: datetime
+
+
+class DebugLedgerJobResponse(BaseModel):
+    id: UUID
+    status: str
+    price_usd: Decimal | None
+    error_message: str | None
+    mock_result_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DebugBalanceLedgerResponse(BaseModel):
+    telegram_id: int
+    balance: BalanceResponse
+    transactions: list[DebugLedgerTransactionResponse]
+    jobs: list[DebugLedgerJobResponse]
+
+
+class DebugStorageTestUploadRequest(BaseModel):
+    content: str = "hello r2"
+
+
+class DebugStorageTestUploadResponse(BaseModel):
+    storage_provider: str
+    file_id: UUID
+    storage_key: str
+    download_url: str | None
+    exists: bool
+
+
+class DebugStorageDeleteResponse(BaseModel):
+    file_id: UUID
+    deleted: bool
+
+
+class DebugStorageCleanupResponse(BaseModel):
+    deleted_count: int
+
+
+class DebugComfyUIHealthResponse(BaseModel):
+    ok: bool
+    base_url: str
+    device: str | None = None
+    vram_free: int | float | None = None
+
+
+class DebugComfyUIValidateWorkflowResponse(BaseModel):
+    nodes: dict[str, Any]
+
+
+class DebugComfyUIPatchWorkflowPreviewRequest(BaseModel):
+    image_filename: str = "test.png"
+    audio_filename: str = "test.mp3"
+    width: int = 480
+    height: int = 480
+    fps: int = 25
+    frame_count: int = 250
+
+
+class DebugComfyUIPatchWorkflowPreviewResponse(BaseModel):
+    nodes: dict[str, Any]
+
+
+class DebugTelegramTestNotificationRequest(BaseModel):
+    telegram_id: int = Field(gt=0)
+    message: str = "test notification"
+
+
+class DebugTelegramTestNotificationResponse(BaseModel):
+    ok: bool

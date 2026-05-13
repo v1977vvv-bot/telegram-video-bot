@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+postgres_data/
+redis_data/
+storage/
