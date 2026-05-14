@@ -29,6 +29,8 @@ from backend.app.schemas.debug import (
     DebugComfyUIValidateWorkflowResponse,
     DebugCreateMockJobsRequest,
     DebugCreateMockJobsResponse,
+    DebugGenerationJobSegmentsResponse,
+    DebugGenerationSegmentResponse,
     DebugLedgerJobResponse,
     DebugLedgerTransactionResponse,
     DebugRepairFrozenBalancesResponse,
@@ -323,6 +325,36 @@ async def get_debug_balance_ledger(
                 updated_at=job.updated_at,
             )
             for job in job_result.scalars()
+        ],
+    )
+
+
+@router.get(
+    "/generation/jobs/{job_id}/segments",
+    response_model=DebugGenerationJobSegmentsResponse,
+)
+async def get_debug_generation_job_segments(
+    job_id: UUID,
+    session: SessionDep,
+) -> DebugGenerationJobSegmentsResponse:
+    _require_local_env()
+
+    result = await session.execute(
+        select(GenerationSegment)
+        .where(GenerationSegment.job_id == job_id)
+        .order_by(GenerationSegment.segment_index)
+    )
+    return DebugGenerationJobSegmentsResponse(
+        job_id=job_id,
+        segments=[
+            DebugGenerationSegmentResponse(
+                segment_index=segment.segment_index,
+                status=segment.status,
+                duration_seconds=segment.duration_seconds,
+                frame_count=segment.frame_count,
+                error_message=segment.error_message,
+            )
+            for segment in result.scalars()
         ],
     )
 

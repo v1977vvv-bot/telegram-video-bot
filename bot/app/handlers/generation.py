@@ -158,6 +158,7 @@ async def handle_generation_confirm(callback: CallbackQuery, state: FSMContext) 
 
     data = await state.get_data()
     job_id = UUID(str(data["job_id"]))
+    segments_count = int(data.get("segments_count") or 1)
     try:
         result = await backend_client.confirm_generation(
             job_id=job_id,
@@ -177,7 +178,7 @@ async def handle_generation_confirm(callback: CallbackQuery, state: FSMContext) 
         return
 
     await state.clear()
-    mode_note = _generation_mode_note()
+    mode_note = _generation_mode_note(segments_count)
     await callback.message.answer(  # type: ignore[union-attr]
         "✅ Задача поставлена в очередь.\n"
         f"ID: {result.job_id}\n"
@@ -291,8 +292,13 @@ def _money(value: Decimal) -> str:
     return f"{value.quantize(Decimal('0.0001'))}"
 
 
-def _generation_mode_note() -> str:
+def _generation_mode_note(segments_count: int) -> str:
     mode = get_settings().generation_mode.strip().lower()
+    if mode == GenerationMode.COMFYUI.value and segments_count > 1:
+        return (
+            f"Аудио будет разбито на {segments_count} сегментов. "
+            "Генерация может занять длительное время.\n"
+        )
     if mode == GenerationMode.COMFYUI.value:
         return "Реальная генерация может занять несколько минут.\n"
     return ""

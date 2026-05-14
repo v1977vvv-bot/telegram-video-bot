@@ -20,6 +20,7 @@ photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomu
 - Local debug workflow validation endpoint: `POST /api/v1/debug/comfyui/validate-workflow`.
 - Local debug workflow patch preview endpoint: `POST /api/v1/debug/comfyui/patch-workflow-preview`.
 - Local debug Telegram notification endpoint: `POST /api/v1/debug/telegram/test-notification`.
+- Local debug segment status endpoint: `GET /api/v1/debug/generation/jobs/{job_id}/segments`.
 - Private file download endpoint: `GET /api/v1/files/{file_id}/download?telegram_id=...`.
 - Generation draft flow endpoints under `/api/v1/generation`.
 - Async SQLAlchemy 2.x, PostgreSQL, Redis, and Alembic setup.
@@ -30,7 +31,7 @@ photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomu
 - Aiogram 3.x bot with `/start`, statistics, generation history, balance top-up stub, help, support,
   `/debug_add_balance`, and an FSM generation flow.
 - Celery worker with a sync SQLAlchemy/psycopg DB layer, mock generation mode, and
-  ComfyUI generation mode for one-segment jobs.
+  ComfyUI generation mode with sequential 30-second segments for long audio.
 - Storage abstraction with local and Cloudflare R2 providers.
 - Local source-file storage under `storage/users/{user_id}` when `STORAGE_PROVIDER=local`.
 - Cloudflare R2 upload and presigned download URLs when `STORAGE_PROVIDER=cloudflare_r2`.
@@ -89,8 +90,8 @@ is optional.
 
 `GENERATION_MODE=mock` keeps generation local to the worker stub and does not call ComfyUI.
 
-`GENERATION_MODE=comfyui` sends one-segment jobs to an already running ComfyUI instance.
-RunPod pod lifecycle is still manual at this stage.
+`GENERATION_MODE=comfyui` sends jobs to an already running ComfyUI instance. RunPod
+pod lifecycle is still manual at this stage.
 
 ComfyUI settings:
 
@@ -100,20 +101,30 @@ COMFYUI_BASE_URL=http://localhost:8188
 COMFYUI_WORKFLOW_PATH=/app/workflows/infinite_talk_api.json
 COMFYUI_TIMEOUT_SECONDS=7200
 COMFYUI_POLL_INTERVAL_SECONDS=5
+COMFYUI_TRANSIENT_RETRY_MAX_ATTEMPTS=5
+COMFYUI_TRANSIENT_RETRY_BACKOFF_SECONDS=5
+COMFYUI_TRANSIENT_RETRY_BACKOFF_MAX_SECONDS=30
 COMFYUI_INPUT_SUBFOLDER=ultronlab
 COMFYUI_OUTPUT_SUBFOLDER=InfiniteTalk
+SEGMENT_IMAGE_STRATEGY=last_frame
 ```
 
 - `COMFYUI_BASE_URL` is the base ComfyUI URL without a fragment/hash.
 - `COMFYUI_WORKFLOW_PATH` is the in-container path to the API workflow JSON.
 - `COMFYUI_TIMEOUT_SECONDS` is the maximum generation wait time.
 - `COMFYUI_POLL_INTERVAL_SECONDS` is the polling interval for status checks.
+- `COMFYUI_TRANSIENT_RETRY_MAX_ATTEMPTS` controls per-request retry attempts for
+  transient RunPod proxy or network errors.
+- `COMFYUI_TRANSIENT_RETRY_BACKOFF_SECONDS` is the initial retry backoff.
+- `COMFYUI_TRANSIENT_RETRY_BACKOFF_MAX_SECONDS` caps retry backoff.
 - `COMFYUI_INPUT_SUBFOLDER` is the ComfyUI input subfolder.
 - `COMFYUI_OUTPUT_SUBFOLDER` is the ComfyUI output subfolder.
+- `SEGMENT_IMAGE_STRATEGY` controls the image input for long segmented jobs:
+  `last_frame` or `source_image`.
 
-Stage 5 limitation: ComfyUI mode supports only one segment, so audio must be no
-longer than `GENERATION_MAX_SEGMENT_SECONDS` (30 seconds by default). Longer queued
-jobs fail with a clear error and frozen balance is released.
+ComfyUI mode supports long audio by splitting it into sequential segments of
+`GENERATION_MAX_SEGMENT_SECONDS` seconds (30 seconds by default). The hard MVP limit
+is still `GENERATION_MAX_AUDIO_SECONDS`; longer audio is rejected before queueing.
 
 For RunPod proxy URLs, use the base address:
 
@@ -288,7 +299,7 @@ In Telegram:
 4. Upload an MP3, WAV, M4A, or OGG audio file.
 5. Choose one of the supported formats.
 6. Confirm the price.
-7. Check `Мои генерации` after the mock worker completes.
+7. Check `Мои генерации` after the worker completes.
 
 When `STORAGE_PROVIDER=local`, the backend stores uploaded source files locally:
 
@@ -310,8 +321,55 @@ In `GENERATION_MODE=comfyui`, the worker downloads source image/audio from stora
 uploads them to ComfyUI, patches `workflows/infinite_talk_api.json`, queues `/prompt`,
 polls `/history/{prompt_id}`, downloads the produced mp4 through `/view`, stores it
 through the configured storage provider, captures frozen balance, and sets the job
-to `completed`. In `Мои генерации`, completed jobs show a `Скачать результат` button
-when a result URL is available.
+to `completed`. For audio longer than one segment, the worker generates each segment
+sequentially and stitches the segment videos into one final mp4. In `Мои генерации`,
+completed jobs show a `Скачать результат` button when a result URL is available.
+
+Inspect segment status for a local job:
+
+```bash
+curl http://localhost:8000/api/v1/debug/generation/jobs/{job_id}/segments
+```
+
+## Long audio / segmented generation
+
+Long ComfyUI jobs are processed as a linear segment pipeline:
+
+1. The backend creates `generation_segments` from the original audio duration using
+   `GENERATION_MAX_SEGMENT_SECONDS`.
+2. The worker downloads the original image and audio from storage.
+3. `ffmpeg` splits audio into local WAV files: `segment_001.wav`, `segment_002.wav`,
+   and so on.
+4. Segment 1 uses the original source image.
+5. After each non-final segment, the worker extracts the last frame as PNG and uses it
+   as the next segment's image input.
+6. Each segment is sent to ComfyUI as a separate `/prompt`.
+7. Segment mp4 files are concatenated with `ffmpeg` concat demuxer.
+8. For multi-segment jobs, the final video audio track is remuxed from the original
+   uploaded full audio to reduce volume or codec jumps at segment joins.
+9. The final mp4 is trimmed to the original audio duration if ComfyUI, concat, or
+   remux output runs long, then uploaded to the configured storage provider.
+
+Segment image strategies:
+
+- `SEGMENT_IMAGE_STRATEGY=last_frame`: each next segment starts from the previous
+  segment's last generated frame. This gives smoother visual continuity, but long
+  videos can drift gradually.
+- `SEGMENT_IMAGE_STRATEGY=source_image`: every segment starts from the original source
+  image. This can improve identity stability and reduce quality drift, but segment
+  boundaries may look like a visual reset.
+
+Only the final mp4 is uploaded to R2 in Stage 6. Audio segments, intermediate segment
+mp4 files, and last-frame PNG files stay in worker temp storage. Successful jobs clean
+up temp files. Failed jobs keep temp files in `APP_ENV=local` for debugging.
+
+Current limitations:
+
+- No segment overlap or crossfade yet.
+- Visual drift between segments is possible because each next segment starts from the
+  previous segment's last generated frame when `SEGMENT_IMAGE_STRATEGY=last_frame`.
+- A visual reset at segment boundaries is possible when `SEGMENT_IMAGE_STRATEGY=source_image`.
+- Local Docker setup is tuned for one worker process at a time.
 
 ## Telegram notifications
 
@@ -415,10 +473,34 @@ ComfyUI troubleshooting:
   for ComfyUI `/prompt` validation.
 - `ComfyUI prompt timed out`: increase `COMFYUI_TIMEOUT_SECONDS` or inspect
   `docker compose logs -f worker` and the ComfyUI UI.
+- RunPod proxy `502 Bad Gateway` during `/history` polling: this is treated as
+  transient. The worker logs
+  `ComfyUI transient error while polling history prompt_id=... status=502 retry_in=...`
+  and keeps polling until `COMFYUI_TIMEOUT_SECONDS` expires.
 - `ComfyUI generated longer video than audio`: node `317` is patched with
   `trim_to_audio=true`, and the worker also runs a postprocess ffmpeg trim before
   saving the mp4 to storage. Inspect `video_duration_before` and
   `video_duration_after` in `docker compose logs -f worker`.
+- Volume jump at segment boundary: multi-segment final output is remuxed with the
+  original uploaded full audio. Inspect `Final audio remux started` and
+  `Final audio remux completed` in worker logs.
+- Visual reset between segments: this is expected with
+  `SEGMENT_IMAGE_STRATEGY=source_image`. Switch back to `last_frame` for smoother
+  continuity.
+- Visual drift over long videos: this is more likely with
+  `SEGMENT_IMAGE_STRATEGY=last_frame`. Test `source_image` to trade continuity for
+  identity stability.
+- Segment failed: inspect `docker compose logs -f worker` and
+  `GET /api/v1/debug/generation/jobs/{job_id}/segments`. The worker marks the job
+  failed, marks unfinished segments failed, and refunds frozen balance.
+- Last frame extraction failed: check that the previous segment mp4 is valid and
+  that `ffmpeg` is available in the worker image. Failed local jobs keep temp files
+  under `storage/worker/{job_id}`.
+- `ffmpeg concat failed`: the worker first tries stream-copy concat and falls back to
+  H.264/AAC re-encoding. If both fail, inspect segment codecs and temp files.
+- Final video duration mismatch: the worker logs final `video_duration_before` and
+  `video_duration_after`; long output is trimmed to the original audio duration,
+  while short output is logged as a warning.
 - Missing custom node/model errors must be fixed inside the manually running ComfyUI
   environment.
 - `404` on `/view`: the filename, subfolder, or output type returned by history does
@@ -428,7 +510,6 @@ ComfyUI troubleshooting:
 ## Next stages
 
 - RunPod pod lifecycle management.
-- Multi-segment ComfyUI generation and video stitching.
+- Segment overlap/crossfade and replacing concatenated audio with original full audio.
 - Production cleanup scheduling and storage lifecycle policies.
 - Cryptomus invoice creation and webhook processing.
-- User completion notifications from worker to Telegram.

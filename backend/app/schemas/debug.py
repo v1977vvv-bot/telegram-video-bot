@@ -127,3 +127,16 @@ class DebugTelegramTestNotificationRequest(BaseModel):
 
 class DebugTelegramTestNotificationResponse(BaseModel):
     ok: bool
+
+
+class DebugGenerationSegmentResponse(BaseModel):
+    segment_index: int
+    status: str
+    duration_seconds: Decimal
+    frame_count: int
+    error_message: str | None
+
+
+class DebugGenerationJobSegmentsResponse(BaseModel):
+    job_id: UUID
+    segments: list[DebugGenerationSegmentResponse]

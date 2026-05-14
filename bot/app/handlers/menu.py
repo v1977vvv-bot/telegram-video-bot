@@ -187,6 +187,7 @@ def _format_generation_item(index: int, item: GenerationHistoryItemDto) -> str:
         f"Формат: {item.width}×{item.height}\n"
         f"FPS: {item.fps}\n"
         f"Длительность: {duration}\n"
+        f"Сегментов: {item.segments_count}\n"
         f"Стоимость: {price}\n"
         f"Дата: {created_at}"
     )

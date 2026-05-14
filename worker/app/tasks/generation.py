@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import shutil
 import time
 from dataclasses import dataclass
@@ -16,18 +15,25 @@ from sqlalchemy.orm import Session, selectinload
 from backend.app.models.generation_job import GenerationJob
 from backend.app.models.generation_segment import GenerationSegment
 from shared.app.config import Settings, get_settings
-from shared.app.enums import FileType, GenerationMode, JobStatus, SegmentStatus
+from shared.app.enums import (
+    FileType,
+    GenerationMode,
+    JobStatus,
+    SegmentImageStrategy,
+    SegmentStatus,
+)
 from worker.app.celery_app import celery_app
 from worker.app.database import get_worker_session
+from worker.app.services.audio import AudioSegmentFile, AudioService
 from worker.app.services.balance import SyncBalanceService
 from worker.app.services.comfyui_client import ComfyUIClient
 from worker.app.services.storage import WorkerStorageService
 from worker.app.services.telegram_notify import GenerationNotification, TelegramNotifyService
 from worker.app.services.video_probe import VideoProbeService
+from worker.app.services.video_stitch import VideoStitchService
 from worker.app.services.workflow_patcher import patch_infinite_talk_workflow
 
 logger = logging.getLogger(__name__)
-ONE_SEGMENT_ERROR = "ComfyUI mode currently supports only one segment up to 30 seconds"
 
 
 class JobNotFoundError(RuntimeError):
@@ -50,8 +56,17 @@ class ComfyUIJobContext:
     height: int
     fps: int
     audio_duration_seconds: Decimal
+    segments: list[ComfyUISegmentContext]
+
+
+@dataclass(frozen=True, slots=True)
+class ComfyUISegmentContext:
+    id: UUID
+    segment_index: int
+    start_seconds: Decimal
+    end_seconds: Decimal
+    duration_seconds: Decimal
     frame_count: int
-    segment_ids: list[UUID]
 
 
 @celery_app.task(name="process_generation_job")
@@ -153,6 +168,7 @@ def _run_mock_generation(job_id: UUID) -> dict[str, str]:
                 job_id=job.id,
                 audio_duration_seconds=job.audio_duration_seconds,
                 price_usd=job.price_usd,
+                segments_count=job.segments_count,
                 result_url=result_url,
             )
 
@@ -164,9 +180,13 @@ def _run_mock_generation(job_id: UUID) -> dict[str, str]:
 
 def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
     context = _start_comfyui_job(job_id, settings)
+    segment_image_strategy = _resolve_segment_image_strategy(settings)
     temp_root = Path(settings.local_storage_dir) / "worker" / str(job_id)
     input_dir = temp_root / "input"
-    output_dir = temp_root / "output"
+    audio_segments_dir = temp_root / "audio_segments"
+    segments_dir = temp_root / "segments"
+    frames_dir = temp_root / "frames"
+    final_dir = temp_root / "final"
     success = False
     client = ComfyUIClient(settings)
     try:
@@ -176,58 +196,81 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
             audio_path = storage.download_to_temp(context.source_audio_file_id, input_dir)
 
         client.healthcheck()
-        image_upload = client.upload_image(
-            image_path,
-            image_path.name,
-            settings.comfyui_input_subfolder,
+        audio_segments = AudioService().split_audio_to_segments(
+            input_audio_path=audio_path,
+            output_dir=audio_segments_dir,
+            max_segment_seconds=settings.generation_max_segment_seconds,
         )
-        audio_upload = client.upload_audio(
-            audio_path,
-            audio_path.name,
-            settings.comfyui_input_subfolder,
-        )
-        filename_prefix = f"{settings.comfyui_output_subfolder}/job_{job_id}"
-        prompt = patch_infinite_talk_workflow(
-            workflow_path=Path(settings.comfyui_workflow_path),
-            image_upload=image_upload,
-            audio_upload=audio_upload,
-            width=context.width,
-            height=context.height,
-            fps=context.fps,
-            frame_count=context.frame_count,
-            filename_prefix=filename_prefix,
-        )
-        prompt_id = client.queue_prompt(prompt)
-        logger.info("ComfyUI prompt queued job_id=%s prompt_id=%s", job_id, prompt_id)
-        history = client.wait_for_completion(
-            prompt_id,
-            settings.comfyui_timeout_seconds,
-            settings.comfyui_poll_interval_seconds,
-        )
-        output_file = client.find_video_output(history)
+        _validate_audio_segments(job_id, context, audio_segments)
+
+        current_image_path = image_path
+        segment_paths: list[Path] = []
         logger.info(
-            "ComfyUI mp4 output found job_id=%s prompt_id=%s filename=%s subfolder=%s",
+            "ComfyUI generation strategy job_id=%s segments_count=%s "
+            "segment_image_strategy=%s final_audio_strategy=%s",
             job_id,
-            prompt_id,
-            output_file.filename,
-            output_file.subfolder,
+            len(context.segments),
+            segment_image_strategy.value,
+            "original_audio_for_multisegment" if len(context.segments) > 1 else "segment_audio",
         )
-        output_path = client.download_output(
-            filename=output_file.filename,
-            subfolder=output_file.subfolder,
-            type_=output_file.type,
-            destination=output_dir / output_file.filename,
+        for position, segment in enumerate(context.segments):
+            audio_segment = audio_segments[position]
+            segment_image_path = (
+                image_path
+                if segment_image_strategy == SegmentImageStrategy.SOURCE_IMAGE
+                else current_image_path
+            )
+            if segment_image_strategy == SegmentImageStrategy.SOURCE_IMAGE:
+                logger.info(
+                    "Segment image strategy source_image: using original image "
+                    "job_id=%s segment_index=%s",
+                    job_id,
+                    segment.segment_index,
+                )
+            _mark_segment_generating(segment.id)
+            segment_path = _generate_comfyui_segment(
+                client=client,
+                settings=settings,
+                context=context,
+                segment=segment,
+                input_image_path=segment_image_path,
+                input_audio_segment_path=audio_segment.path,
+                output_dir=segments_dir,
+            )
+            segment_paths.append(segment_path)
+            _mark_segment_completed(segment.id)
+
+            if (
+                position < len(context.segments) - 1
+                and segment_image_strategy == SegmentImageStrategy.LAST_FRAME
+            ):
+                next_frame_path = frames_dir / f"last_frame_{segment.segment_index:03d}.png"
+                VideoProbeService().extract_last_frame(segment_path, next_frame_path)
+                logger.info(
+                    "Last frame extracted job_id=%s segment_index=%s path=%s",
+                    job_id,
+                    segment.segment_index,
+                    next_frame_path,
+                )
+                current_image_path = next_frame_path
+
+        final_path = _build_final_video(
+            job_id=job_id,
+            context=context,
+            segment_paths=segment_paths,
+            final_dir=final_dir,
+            original_audio_path=audio_path,
         )
-        output_path = _trim_comfyui_output_if_needed(job_id, context, output_path)
-        notification = _complete_comfyui_job(job_id, context, output_path)
+
+        notification = _complete_comfyui_job(job_id, context, final_path)
         _notify_generation_completed(notification)
         success = True
         logger.info(
-            "process_generation_job comfyui completed job_id=%s prompt_id=%s",
+            "process_generation_job comfyui completed job_id=%s segments_count=%s",
             job_id,
-            prompt_id,
+            len(context.segments),
         )
-        return {"status": "completed", "job_id": str(job_id), "prompt_id": prompt_id}
+        return {"status": "completed", "job_id": str(job_id)}
     finally:
         client.close()
         if success or settings.app_env != "local":
@@ -249,26 +292,35 @@ def _start_comfyui_job(job_id: UUID, settings: Settings) -> ComfyUIJobContext:
             if job.price_usd is None:
                 raise RuntimeError("Job price is missing")
 
-            segment_ids = [segment.id for segment in job.segments]
-            if len(segment_ids) != 1 or job.audio_duration_seconds > Decimal(
-                settings.generation_max_segment_seconds
-            ):
-                raise RuntimeError(ONE_SEGMENT_ERROR)
+            if job.audio_duration_seconds > Decimal(settings.generation_max_audio_seconds):
+                raise RuntimeError(
+                    f"Audio is too long. Max {settings.generation_max_audio_seconds} seconds"
+                )
+            segments = [
+                ComfyUISegmentContext(
+                    id=segment.id,
+                    segment_index=segment.segment_index,
+                    start_seconds=segment.audio_start_seconds,
+                    end_seconds=segment.audio_end_seconds,
+                    duration_seconds=segment.duration_seconds,
+                    frame_count=segment.frame_count,
+                )
+                for segment in job.segments
+            ]
+            if not segments:
+                raise RuntimeError("Generation job has no segments")
 
             now = datetime.now(UTC)
             job.status = JobStatus.GENERATING.value
             job.started_at = now
-            for segment in job.segments:
-                segment.status = SegmentStatus.GENERATING.value
-                segment.started_at = now
 
-            frame_count = math.ceil(float(job.audio_duration_seconds * job.fps))
             logger.info(
-                "ComfyUI frame plan job_id=%s audio_duration_seconds=%s fps=%s frame_count=%s",
+                "ComfyUI segmented plan job_id=%s audio_duration_seconds=%s fps=%s "
+                "segments_count=%s",
                 job.id,
                 job.audio_duration_seconds,
                 job.fps,
-                frame_count,
+                len(segments),
             )
 
             return ComfyUIJobContext(
@@ -280,35 +332,237 @@ def _start_comfyui_job(job_id: UUID, settings: Settings) -> ComfyUIJobContext:
                 height=job.height,
                 fps=job.fps,
                 audio_duration_seconds=job.audio_duration_seconds,
-                frame_count=frame_count,
-                segment_ids=segment_ids,
+                segments=segments,
             )
 
 
-def _trim_comfyui_output_if_needed(
+def _validate_audio_segments(
     job_id: UUID,
     context: ComfyUIJobContext,
+    audio_segments: list[AudioSegmentFile],
+) -> None:
+    if len(audio_segments) != len(context.segments):
+        raise RuntimeError(
+            f"Audio split produced {len(audio_segments)} segments, expected {len(context.segments)}"
+        )
+
+    for expected, actual in zip(context.segments, audio_segments, strict=True):
+        if expected.segment_index != actual.segment_index:
+            raise RuntimeError(
+                f"Audio segment index mismatch: expected {expected.segment_index}, "
+                f"got {actual.segment_index}"
+            )
+        logger.info(
+            "Audio segment prepared job_id=%s segments_count=%s segment_index=%s "
+            "start=%s end=%s duration=%s",
+            job_id,
+            len(context.segments),
+            actual.segment_index,
+            actual.start_seconds,
+            actual.end_seconds,
+            actual.duration_seconds,
+        )
+
+
+def _resolve_segment_image_strategy(settings: Settings) -> SegmentImageStrategy:
+    raw_value = settings.segment_image_strategy.strip().lower()
+    try:
+        return SegmentImageStrategy(raw_value)
+    except ValueError:
+        logger.warning(
+            "Unknown SEGMENT_IMAGE_STRATEGY=%s; falling back to %s",
+            raw_value,
+            SegmentImageStrategy.LAST_FRAME.value,
+        )
+        return SegmentImageStrategy.LAST_FRAME
+
+
+def _generate_comfyui_segment(
+    *,
+    client: ComfyUIClient,
+    settings: Settings,
+    context: ComfyUIJobContext,
+    segment: ComfyUISegmentContext,
+    input_image_path: Path,
+    input_audio_segment_path: Path,
+    output_dir: Path,
+) -> Path:
+    logger.info(
+        "Segment generation started job_id=%s segment_index=%s duration=%s frame_count=%s",
+        context.job_id,
+        segment.segment_index,
+        segment.duration_seconds,
+        segment.frame_count,
+    )
+    image_upload = client.upload_image(
+        input_image_path,
+        input_image_path.name,
+        settings.comfyui_input_subfolder,
+    )
+    audio_upload = client.upload_audio(
+        input_audio_segment_path,
+        input_audio_segment_path.name,
+        settings.comfyui_input_subfolder,
+    )
+    filename_prefix = (
+        f"{settings.comfyui_output_subfolder}/"
+        f"job_{context.job_id}_segment_{segment.segment_index:03d}"
+    )
+    prompt = patch_infinite_talk_workflow(
+        workflow_path=Path(settings.comfyui_workflow_path),
+        image_upload=image_upload,
+        audio_upload=audio_upload,
+        width=context.width,
+        height=context.height,
+        fps=context.fps,
+        frame_count=segment.frame_count,
+        filename_prefix=filename_prefix,
+    )
+    prompt_id = client.queue_prompt(prompt)
+    logger.info(
+        "Segment prompt queued job_id=%s segment_index=%s prompt_id=%s",
+        context.job_id,
+        segment.segment_index,
+        prompt_id,
+    )
+    history = client.wait_for_completion(
+        prompt_id,
+        settings.comfyui_timeout_seconds,
+        settings.comfyui_poll_interval_seconds,
+    )
+    output_file = client.find_video_output(history)
+    logger.info(
+        "Segment mp4 found job_id=%s segment_index=%s prompt_id=%s filename=%s subfolder=%s",
+        context.job_id,
+        segment.segment_index,
+        prompt_id,
+        output_file.filename,
+        output_file.subfolder,
+    )
+    downloaded_path = client.download_output(
+        filename=output_file.filename,
+        subfolder=output_file.subfolder,
+        type_=output_file.type,
+        destination=output_dir / f"segment_{segment.segment_index:03d}.mp4",
+    )
+    return _trim_video_if_needed(
+        job_id=context.job_id,
+        label=f"segment_{segment.segment_index:03d}",
+        output_path=downloaded_path,
+        target_duration=segment.duration_seconds,
+    )
+
+
+def _build_final_video(
+    *,
+    job_id: UUID,
+    context: ComfyUIJobContext,
+    segment_paths: list[Path],
+    final_dir: Path,
+    original_audio_path: Path,
+) -> Path:
+    if not segment_paths:
+        raise RuntimeError("No generated segment videos")
+    if len(segment_paths) == 1:
+        return _trim_video_if_needed(
+            job_id=job_id,
+            label="final",
+            output_path=segment_paths[0],
+            target_duration=context.audio_duration_seconds,
+            shorter_warning_delta=Decimal("0.500"),
+        )
+
+    final_path = final_dir / "final.mp4"
+    logger.info("Stitch started job_id=%s segments_count=%s", job_id, len(segment_paths))
+    stitched_path = VideoStitchService().stitch_mp4_segments(segment_paths, final_path)
+    logger.info("Stitch completed job_id=%s path=%s", job_id, stitched_path)
+
+    video_probe = VideoProbeService()
+    duration_before_remux = video_probe.get_video_duration_seconds(stitched_path)
+    remuxed_path = final_dir / "final_with_original_audio.mp4"
+    logger.info(
+        "Final audio remux started job_id=%s final_duration_before_remux=%s target_duration=%s",
+        job_id,
+        duration_before_remux,
+        context.audio_duration_seconds,
+    )
+    remuxed_path = VideoStitchService().replace_audio_with_original(
+        video_path=stitched_path,
+        original_audio_path=original_audio_path,
+        output_path=remuxed_path,
+        target_duration_seconds=context.audio_duration_seconds,
+    )
+    duration_after_remux = video_probe.get_video_duration_seconds(remuxed_path)
+    trimmed_path = _trim_video_if_needed(
+        job_id=job_id,
+        label="final",
+        output_path=remuxed_path,
+        target_duration=context.audio_duration_seconds,
+        shorter_warning_delta=Decimal("0.500"),
+    )
+    duration_after_trim = video_probe.get_video_duration_seconds(trimmed_path)
+    logger.info(
+        "Final audio remux completed job_id=%s final_duration_before_remux=%s "
+        "final_duration_after_remux=%s final_duration_after_trim=%s",
+        job_id,
+        duration_before_remux,
+        duration_after_remux,
+        duration_after_trim,
+    )
+    return trimmed_path
+
+
+def _mark_segment_generating(segment_id: UUID) -> None:
+    with get_worker_session() as session:
+        with session.begin():
+            segment = session.get(GenerationSegment, segment_id, with_for_update=True)
+            if segment is None:
+                raise RuntimeError(f"Generation segment not found segment_id={segment_id}")
+            segment.status = SegmentStatus.GENERATING.value
+            segment.started_at = datetime.now(UTC)
+            segment.error_message = None
+
+
+def _mark_segment_completed(segment_id: UUID) -> None:
+    with get_worker_session() as session:
+        with session.begin():
+            segment = session.get(GenerationSegment, segment_id, with_for_update=True)
+            if segment is None:
+                raise RuntimeError(f"Generation segment not found segment_id={segment_id}")
+            segment.status = SegmentStatus.COMPLETED.value
+            segment.completed_at = datetime.now(UTC)
+            segment.error_message = None
+
+
+def _trim_video_if_needed(
+    *,
+    job_id: UUID,
+    label: str,
     output_path: Path,
+    target_duration: Decimal,
+    longer_trim_delta: Decimal = Decimal("0.200"),
+    shorter_warning_delta: Decimal = Decimal("0.300"),
 ) -> Path:
     video_probe = VideoProbeService()
     duration_before = video_probe.get_video_duration_seconds(output_path)
-    target_duration = context.audio_duration_seconds
 
-    if duration_before < target_duration - Decimal("0.300"):
+    if duration_before < target_duration - shorter_warning_delta:
         logger.warning(
-            "ComfyUI video shorter than audio job_id=%s audio_duration_seconds=%s "
+            "Video shorter than target job_id=%s label=%s target_duration=%s "
             "video_duration_before=%s",
             job_id,
+            label,
             target_duration,
             duration_before,
         )
         return output_path
 
-    if duration_before <= target_duration + Decimal("0.200"):
+    if duration_before <= target_duration + longer_trim_delta:
         logger.info(
-            "ComfyUI video duration accepted job_id=%s audio_duration_seconds=%s "
+            "Video duration accepted job_id=%s label=%s target_duration=%s "
             "video_duration_before=%s video_duration_after=%s",
             job_id,
+            label,
             target_duration,
             duration_before,
             duration_before,
@@ -323,9 +577,10 @@ def _trim_comfyui_output_if_needed(
     )
     duration_after = video_probe.get_video_duration_seconds(trimmed_path)
     logger.info(
-        "ComfyUI video duration trimmed job_id=%s audio_duration_seconds=%s "
+        "Video duration trimmed job_id=%s label=%s target_duration=%s "
         "video_duration_before=%s video_duration_after=%s",
         job_id,
+        label,
         target_duration,
         duration_before,
         duration_after,
@@ -375,12 +630,18 @@ def _complete_comfyui_job(
             for segment in job.segments:
                 segment.status = SegmentStatus.COMPLETED.value
                 segment.completed_at = now
+            logger.info(
+                "Final uploaded to storage job_id=%s output_file_id=%s",
+                job_id,
+                result_file.id,
+            )
             logger.info("generation job completed and balance captured job_id=%s", job_id)
             return GenerationNotification(
                 telegram_id=telegram_id,
                 job_id=job.id,
                 audio_duration_seconds=job.audio_duration_seconds,
                 price_usd=job.price_usd,
+                segments_count=job.segments_count,
                 result_url=result_url,
             )
 
@@ -442,6 +703,7 @@ def _mark_job_failed(job_id: UUID, error_message: str) -> GenerationNotification
                 job_id=job.id,
                 audio_duration_seconds=job.audio_duration_seconds,
                 price_usd=job.price_usd,
+                segments_count=job.segments_count,
                 error_message=job.error_message,
                 funds_returned=funds_returned,
             )

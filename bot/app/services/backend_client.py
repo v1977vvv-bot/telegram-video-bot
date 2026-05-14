@@ -128,7 +128,7 @@ class BotBackendClient:
     def __init__(self) -> None:
         settings = get_settings()
         self._base_url = settings.backend_internal_url.rstrip("/")
-        self._timeout = httpx.Timeout(10.0, connect=3.0)
+        self._timeout = httpx.Timeout(120.0, connect=5.0)
 
     async def upsert_telegram_user(
         self,

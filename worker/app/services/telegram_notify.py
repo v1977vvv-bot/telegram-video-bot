@@ -21,6 +21,7 @@ class GenerationNotification:
     job_id: UUID
     audio_duration_seconds: Decimal | None
     price_usd: Decimal | None
+    segments_count: int | None = None
     result_url: str | None = None
     error_message: str | None = None
     funds_returned: bool = True
@@ -38,6 +39,7 @@ class TelegramNotifyService:
             "✅ Видео готово\n\n"
             f"ID: {_short_id(notification.job_id)}\n"
             f"Длительность: {_duration(notification.audio_duration_seconds)}\n"
+            f"{_segments_line(notification.segments_count)}"
             f"Стоимость: ${_money(notification.price_usd)}"
         )
         reply_markup = None
@@ -140,6 +142,12 @@ def _money(value: Decimal | None) -> str:
     if value is None:
         return "0.0000"
     return f"{value.quantize(Decimal('0.0001'))}"
+
+
+def _segments_line(segments_count: int | None) -> str:
+    if segments_count is None or segments_count <= 1:
+        return ""
+    return f"Сегментов: {segments_count}\n"
 
 
 def _refund_line(funds_returned: bool) -> str:

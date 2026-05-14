@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     comfyui_workflow_path: str = "/app/workflows/infinite_talk_api.json"
     comfyui_timeout_seconds: int = 7200
     comfyui_poll_interval_seconds: int = 5
+    comfyui_transient_retry_max_attempts: int = 5
+    comfyui_transient_retry_backoff_seconds: int = 5
+    comfyui_transient_retry_backoff_max_seconds: int = 30
     comfyui_input_subfolder: str = "ultronlab"
     comfyui_output_subfolder: str = "InfiniteTalk"
 
@@ -75,6 +78,7 @@ class Settings(BaseSettings):
     pricing_min_job_price_usd: Decimal = Field(default=Decimal("0.30"))
     generation_fps: int = 25
     generation_max_segment_seconds: int = 30
+    segment_image_strategy: str = "last_frame"
     result_retention_hours: int = 48
 
     local_storage_dir: str = "/app/storage"

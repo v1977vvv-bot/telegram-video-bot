@@ -20,7 +20,7 @@ from backend.app.services.balances import BalanceService
 from backend.app.services.pricing import PricingService
 from backend.app.services.storage import StorageServiceFactory
 from shared.app.config import Settings, get_settings
-from shared.app.enums import FileType, GenerationMode, JobStatus, SegmentStatus
+from shared.app.enums import FileType, JobStatus, SegmentStatus
 from shared.app.exceptions import AppError
 from shared.app.storage import validated_extension
 
@@ -206,7 +206,7 @@ class GenerationService:
                 raise AppError("Only draft jobs can be confirmed", code="job_not_confirmable")
             if job.price_usd is None:
                 raise AppError("Job price is missing", code="job_price_missing")
-            self._validate_comfyui_limit(job)
+            self._validate_audio_limit(job)
 
             await BalanceService(self._session).freeze_balance_in_transaction(
                 user_id=user.id,
@@ -333,19 +333,16 @@ class GenerationService:
                 status_code=400,
             )
 
-    def _validate_comfyui_limit(self, job: GenerationJob) -> None:
-        if self._settings.generation_mode.strip().lower() != GenerationMode.COMFYUI.value:
-            return
+    def _validate_audio_limit(self, job: GenerationJob) -> None:
         if job.audio_duration_seconds is None:
             raise AppError("Job audio duration is missing", code="job_audio_duration_missing")
 
-        max_seconds = Decimal(self._settings.generation_max_segment_seconds)
-        if job.segments_count <= 1 and job.audio_duration_seconds <= max_seconds:
+        max_seconds = Decimal(self._settings.generation_max_audio_seconds)
+        if job.audio_duration_seconds <= max_seconds:
             return
 
         raise AppError(
-            "Реальная генерация сейчас поддерживает аудио до 30 секунд. "
-            "Более длинные аудио будут подключены позже.",
-            code="comfyui_one_segment_limit",
+            f"Аудио слишком длинное. Максимум {self._settings.generation_max_audio_seconds} сек.",
+            code="audio_too_long",
             status_code=400,
         )

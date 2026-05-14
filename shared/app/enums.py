@@ -44,6 +44,11 @@ class GenerationMode(StrEnum):
     COMFYUI = "comfyui"
 
 
+class SegmentImageStrategy(StrEnum):
+    LAST_FRAME = "last_frame"
+    SOURCE_IMAGE = "source_image"
+
+
 class BalanceTransactionType(StrEnum):
     DEPOSIT = "deposit"
     ADMIN_ADJUSTMENT = "admin_adjustment"
