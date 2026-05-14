@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
 
+import anyio
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, UploadFile
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +23,8 @@ from backend.app.models.uploaded_file import UploadedFile
 from backend.app.repositories.users import UserRepository
 from backend.app.schemas.debug import (
     DebugAddBalanceRequest,
+    DebugAudioSegmentPlanItemResponse,
+    DebugAudioSegmentPlanResponse,
     DebugBalanceLedgerResponse,
     DebugBalanceResponse,
     DebugComfyUIHealthResponse,
@@ -53,6 +57,7 @@ from shared.app.config import get_settings
 from shared.app.database import get_session
 from shared.app.enums import BalanceTransactionType, FileType, JobStatus, SegmentStatus
 from shared.app.exceptions import AppError
+from worker.app.services.audio import AudioService as WorkerAudioService
 from worker.app.services.workflow_patcher import (
     WorkflowPatchError,
     preview_infinite_talk_patch_values,
@@ -350,11 +355,66 @@ async def get_debug_generation_job_segments(
             DebugGenerationSegmentResponse(
                 segment_index=segment.segment_index,
                 status=segment.status,
+                audio_start_seconds=segment.audio_start_seconds,
+                audio_end_seconds=segment.audio_end_seconds,
                 duration_seconds=segment.duration_seconds,
                 frame_count=segment.frame_count,
                 error_message=segment.error_message,
             )
             for segment in result.scalars()
+        ],
+    )
+
+
+@router.post("/audio/segment-plan", response_model=DebugAudioSegmentPlanResponse)
+async def preview_debug_audio_segment_plan(
+    audio: Annotated[UploadFile, File(...)],
+) -> DebugAudioSegmentPlanResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    content = await audio.read()
+    max_bytes = settings.max_audio_size_mb * 1024 * 1024
+    if len(content) > max_bytes:
+        raise AppError(
+            f"Файл слишком большой. Максимум {settings.max_audio_size_mb} MB.",
+            code="audio_too_large",
+            status_code=400,
+        )
+
+    suffix = Path(audio.filename or "audio").suffix or ".audio"
+    temp_dir = Path(settings.local_storage_dir) / "temp" / "debug_audio"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"{uuid.uuid4().hex}{suffix}"
+    temp_path.write_bytes(content)
+    try:
+        plan = await anyio.to_thread.run_sync(
+            lambda: WorkerAudioService().build_segment_plan(
+                input_audio_path=temp_path,
+                max_segment_seconds=settings.generation_max_segment_seconds,
+                strategy=settings.audio_segmentation_strategy,
+                silence_threshold_db=settings.audio_silence_threshold_db,
+                silence_min_duration_seconds=settings.audio_silence_min_duration_seconds,
+                silence_search_window_seconds=settings.audio_silence_search_window_seconds,
+                segment_min_seconds=settings.audio_segment_min_seconds,
+            )
+        )
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    return DebugAudioSegmentPlanResponse(
+        strategy=plan.strategy,
+        duration_seconds=plan.total_duration_seconds,
+        silences_found=len(plan.silences),
+        segments=[
+            DebugAudioSegmentPlanItemResponse(
+                index=boundary.segment_index,
+                start=boundary.start_seconds,
+                end=boundary.end_seconds,
+                duration=boundary.duration_seconds,
+                reason=boundary.reason,
+            )
+            for boundary in plan.boundaries
         ],
     )
 

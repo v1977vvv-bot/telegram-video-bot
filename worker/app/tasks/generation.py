@@ -5,7 +5,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -16,6 +16,7 @@ from backend.app.models.generation_job import GenerationJob
 from backend.app.models.generation_segment import GenerationSegment
 from shared.app.config import Settings, get_settings
 from shared.app.enums import (
+    AudioSegmentationStrategy,
     FileType,
     GenerationMode,
     JobStatus,
@@ -24,7 +25,7 @@ from shared.app.enums import (
 )
 from worker.app.celery_app import celery_app
 from worker.app.database import get_worker_session
-from worker.app.services.audio import AudioSegmentFile, AudioService
+from worker.app.services.audio import AudioSegmentFile, AudioSegmentPlan, AudioService
 from worker.app.services.balance import SyncBalanceService
 from worker.app.services.comfyui_client import ComfyUIClient
 from worker.app.services.storage import WorkerStorageService
@@ -196,10 +197,23 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
             audio_path = storage.download_to_temp(context.source_audio_file_id, input_dir)
 
         client.healthcheck()
-        audio_segments = AudioService().split_audio_to_segments(
+        audio_service = AudioService()
+        audio_plan = audio_service.build_segment_plan(
+            input_audio_path=audio_path,
+            max_segment_seconds=settings.generation_max_segment_seconds,
+            total_duration_seconds=context.audio_duration_seconds,
+            strategy=settings.audio_segmentation_strategy,
+            silence_threshold_db=settings.audio_silence_threshold_db,
+            silence_min_duration_seconds=settings.audio_silence_min_duration_seconds,
+            silence_search_window_seconds=settings.audio_silence_search_window_seconds,
+            segment_min_seconds=settings.audio_segment_min_seconds,
+        )
+        _log_audio_segment_plan(job_id, audio_plan)
+        context = _sync_segments_with_audio_plan(context, audio_plan)
+        audio_segments = audio_service.split_audio_by_boundaries(
             input_audio_path=audio_path,
             output_dir=audio_segments_dir,
-            max_segment_seconds=settings.generation_max_segment_seconds,
+            boundaries=audio_plan.boundaries,
         )
         _validate_audio_segments(job_id, context, audio_segments)
 
@@ -296,18 +310,7 @@ def _start_comfyui_job(job_id: UUID, settings: Settings) -> ComfyUIJobContext:
                 raise RuntimeError(
                     f"Audio is too long. Max {settings.generation_max_audio_seconds} seconds"
                 )
-            segments = [
-                ComfyUISegmentContext(
-                    id=segment.id,
-                    segment_index=segment.segment_index,
-                    start_seconds=segment.audio_start_seconds,
-                    end_seconds=segment.audio_end_seconds,
-                    duration_seconds=segment.duration_seconds,
-                    frame_count=segment.frame_count,
-                )
-                for segment in job.segments
-            ]
-            if not segments:
+            if not job.segments:
                 raise RuntimeError("Generation job has no segments")
 
             now = datetime.now(UTC)
@@ -320,20 +323,39 @@ def _start_comfyui_job(job_id: UUID, settings: Settings) -> ComfyUIJobContext:
                 job.id,
                 job.audio_duration_seconds,
                 job.fps,
-                len(segments),
+                len(job.segments),
             )
 
-            return ComfyUIJobContext(
-                job_id=job.id,
-                user_id=job.user_id,
-                source_image_file_id=job.source_image_file_id,
-                source_audio_file_id=job.source_audio_file_id,
-                width=job.width,
-                height=job.height,
-                fps=job.fps,
-                audio_duration_seconds=job.audio_duration_seconds,
-                segments=segments,
+            return _context_from_job(job)
+
+
+def _context_from_job(job: GenerationJob) -> ComfyUIJobContext:
+    if job.source_image_file_id is None or job.source_audio_file_id is None:
+        raise RuntimeError("Job source image/audio file is missing")
+    if job.audio_duration_seconds is None:
+        raise RuntimeError("Job audio duration is missing")
+
+    return ComfyUIJobContext(
+        job_id=job.id,
+        user_id=job.user_id,
+        source_image_file_id=job.source_image_file_id,
+        source_audio_file_id=job.source_audio_file_id,
+        width=job.width,
+        height=job.height,
+        fps=job.fps,
+        audio_duration_seconds=job.audio_duration_seconds,
+        segments=[
+            ComfyUISegmentContext(
+                id=segment.id,
+                segment_index=segment.segment_index,
+                start_seconds=segment.audio_start_seconds,
+                end_seconds=segment.audio_end_seconds,
+                duration_seconds=segment.duration_seconds,
+                frame_count=segment.frame_count,
             )
+            for segment in job.segments
+        ],
+    )
 
 
 def _validate_audio_segments(
@@ -362,6 +384,120 @@ def _validate_audio_segments(
             actual.end_seconds,
             actual.duration_seconds,
         )
+
+
+def _log_audio_segment_plan(job_id: UUID, plan: AudioSegmentPlan) -> None:
+    logger.info(
+        "Audio segmentation strategy job_id=%s strategy=%s silences_found=%s segments_count=%s",
+        job_id,
+        plan.strategy,
+        len(plan.silences),
+        len(plan.boundaries),
+    )
+    for boundary in plan.boundaries:
+        logger.info(
+            "Audio segment prepared job_id=%s segment_index=%s start=%s end=%s "
+            "duration=%s reason=%s",
+            job_id,
+            boundary.segment_index,
+            boundary.start_seconds,
+            boundary.end_seconds,
+            boundary.duration_seconds,
+            boundary.reason,
+        )
+        if boundary.reason == "silence" and boundary.silence is not None:
+            logger.info(
+                "Silence-based cut selected job_id=%s target_end=%s cut=%s "
+                "silence_start=%s silence_end=%s",
+                job_id,
+                boundary.target_end_seconds,
+                boundary.end_seconds,
+                boundary.silence.start_seconds,
+                boundary.silence.end_seconds,
+            )
+        elif (
+            plan.strategy == AudioSegmentationStrategy.SILENCE.value and boundary.reason == "fixed"
+        ):
+            logger.info(
+                "Silence cut not found, using fixed boundary job_id=%s target_end=%s",
+                job_id,
+                boundary.target_end_seconds,
+            )
+
+
+def _sync_segments_with_audio_plan(
+    context: ComfyUIJobContext,
+    plan: AudioSegmentPlan,
+) -> ComfyUIJobContext:
+    if _context_matches_audio_plan(context, plan):
+        return context
+
+    with get_worker_session() as session:
+        with session.begin():
+            job = _get_job(session, context.job_id, with_segments=True, for_update=True)
+            if job is None:
+                raise RuntimeError(f"Generation job not found job_id={context.job_id}")
+            if job.status != JobStatus.GENERATING.value:
+                raise RuntimeError(f"Job is not generating: {job.status}")
+            if any(
+                segment.status not in {SegmentStatus.QUEUED.value, SegmentStatus.PENDING.value}
+                for segment in job.segments
+            ):
+                raise RuntimeError("Cannot recalculate segments after segment processing started")
+
+            old_segments_count = len(job.segments)
+            for segment in list(job.segments):
+                session.delete(segment)
+            session.flush()
+
+            for boundary in plan.boundaries:
+                session.add(
+                    GenerationSegment(
+                        job_id=job.id,
+                        segment_index=boundary.segment_index,
+                        status=SegmentStatus.QUEUED.value,
+                        audio_start_seconds=boundary.start_seconds,
+                        audio_end_seconds=boundary.end_seconds,
+                        duration_seconds=boundary.duration_seconds,
+                        frame_count=_frame_count(boundary.duration_seconds, job.fps),
+                        input_audio_file_id=job.source_audio_file_id,
+                        input_image_file_id=job.source_image_file_id,
+                    )
+                )
+            job.segments_count = len(plan.boundaries)
+            session.flush()
+            session.expire(job, ["segments"])
+            refreshed_job = _get_job(session, context.job_id, with_segments=True, for_update=True)
+            if refreshed_job is None:
+                raise RuntimeError(f"Generation job not found job_id={context.job_id}")
+
+            logger.info(
+                "Segment boundaries recalculated by %s strategy old_segments_count=%s "
+                "new_segments_count=%s price_unchanged=true",
+                plan.strategy,
+                old_segments_count,
+                len(plan.boundaries),
+            )
+            return _context_from_job(refreshed_job)
+
+
+def _context_matches_audio_plan(context: ComfyUIJobContext, plan: AudioSegmentPlan) -> bool:
+    if len(context.segments) != len(plan.boundaries):
+        return False
+    for segment, boundary in zip(context.segments, plan.boundaries, strict=True):
+        if (
+            segment.segment_index != boundary.segment_index
+            or segment.start_seconds != boundary.start_seconds
+            or segment.end_seconds != boundary.end_seconds
+            or segment.duration_seconds != boundary.duration_seconds
+            or segment.frame_count != _frame_count(boundary.duration_seconds, context.fps)
+        ):
+            return False
+    return True
+
+
+def _frame_count(duration_seconds: Decimal, fps: int) -> int:
+    return int((duration_seconds * Decimal(fps)).to_integral_value(rounding=ROUND_CEILING))
 
 
 def _resolve_segment_image_strategy(settings: Settings) -> SegmentImageStrategy:

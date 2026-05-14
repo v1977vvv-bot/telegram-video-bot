@@ -21,6 +21,7 @@ photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomu
 - Local debug workflow patch preview endpoint: `POST /api/v1/debug/comfyui/patch-workflow-preview`.
 - Local debug Telegram notification endpoint: `POST /api/v1/debug/telegram/test-notification`.
 - Local debug segment status endpoint: `GET /api/v1/debug/generation/jobs/{job_id}/segments`.
+- Local debug audio segment-plan endpoint: `POST /api/v1/debug/audio/segment-plan`.
 - Private file download endpoint: `GET /api/v1/files/{file_id}/download?telegram_id=...`.
 - Generation draft flow endpoints under `/api/v1/generation`.
 - Async SQLAlchemy 2.x, PostgreSQL, Redis, and Alembic setup.
@@ -107,6 +108,11 @@ COMFYUI_TRANSIENT_RETRY_BACKOFF_MAX_SECONDS=30
 COMFYUI_INPUT_SUBFOLDER=ultronlab
 COMFYUI_OUTPUT_SUBFOLDER=InfiniteTalk
 SEGMENT_IMAGE_STRATEGY=last_frame
+AUDIO_SEGMENTATION_STRATEGY=fixed
+AUDIO_SILENCE_THRESHOLD_DB=-35
+AUDIO_SILENCE_MIN_DURATION_SECONDS=0.30
+AUDIO_SILENCE_SEARCH_WINDOW_SECONDS=7
+AUDIO_SEGMENT_MIN_SECONDS=8
 ```
 
 - `COMFYUI_BASE_URL` is the base ComfyUI URL without a fragment/hash.
@@ -121,6 +127,12 @@ SEGMENT_IMAGE_STRATEGY=last_frame
 - `COMFYUI_OUTPUT_SUBFOLDER` is the ComfyUI output subfolder.
 - `SEGMENT_IMAGE_STRATEGY` controls the image input for long segmented jobs:
   `last_frame` or `source_image`.
+- `AUDIO_SEGMENTATION_STRATEGY` controls segment boundaries: `fixed` or `silence`.
+- `AUDIO_SILENCE_THRESHOLD_DB` is the ffmpeg `silencedetect` noise threshold.
+- `AUDIO_SILENCE_MIN_DURATION_SECONDS` is the minimum pause length to consider.
+- `AUDIO_SILENCE_SEARCH_WINDOW_SECONDS` is the look-back window before the max segment
+  length where the worker searches for a pause.
+- `AUDIO_SEGMENT_MIN_SECONDS` prevents intermediate segments from becoming too short.
 
 ComfyUI mode supports long audio by splitting it into sequential segments of
 `GENERATION_MAX_SEGMENT_SECONDS` seconds (30 seconds by default). The hard MVP limit
@@ -335,20 +347,45 @@ curl http://localhost:8000/api/v1/debug/generation/jobs/{job_id}/segments
 
 Long ComfyUI jobs are processed as a linear segment pipeline:
 
-1. The backend creates `generation_segments` from the original audio duration using
-   `GENERATION_MAX_SEGMENT_SECONDS`.
+1. The backend creates an initial fixed `generation_segments` estimate from the
+   original audio duration using `GENERATION_MAX_SEGMENT_SECONDS`.
 2. The worker downloads the original image and audio from storage.
-3. `ffmpeg` splits audio into local WAV files: `segment_001.wav`, `segment_002.wav`,
+3. The worker builds the final segment plan, either fixed or silence-based.
+4. If `AUDIO_SEGMENTATION_STRATEGY=silence`, `ffmpeg silencedetect` searches for
+   natural pauses before the 30-second boundary. If no pause is found, the worker
+   falls back to the fixed boundary.
+5. If silence boundaries differ from the backend estimate, the worker updates
+   `generation_segments` and `generation_jobs.segments_count` before the first
+   ComfyUI prompt. The confirmed price and frozen balance are not recalculated.
+6. `ffmpeg` splits audio into local WAV files: `segment_001.wav`, `segment_002.wav`,
    and so on.
-4. Segment 1 uses the original source image.
-5. After each non-final segment, the worker extracts the last frame as PNG and uses it
+7. Segment 1 uses the original source image.
+8. After each non-final segment, the worker extracts the last frame as PNG and uses it
    as the next segment's image input.
-6. Each segment is sent to ComfyUI as a separate `/prompt`.
-7. Segment mp4 files are concatenated with `ffmpeg` concat demuxer.
-8. For multi-segment jobs, the final video audio track is remuxed from the original
+9. Each segment is sent to ComfyUI as a separate `/prompt`.
+10. Segment mp4 files are concatenated with `ffmpeg` concat demuxer.
+11. For multi-segment jobs, the final video audio track is remuxed from the original
    uploaded full audio to reduce volume or codec jumps at segment joins.
-9. The final mp4 is trimmed to the original audio duration if ComfyUI, concat, or
+12. The final mp4 is trimmed to the original audio duration if ComfyUI, concat, or
    remux output runs long, then uploaded to the configured storage provider.
+
+Audio segmentation strategies:
+
+- `AUDIO_SEGMENTATION_STRATEGY=fixed`: cut every
+  `GENERATION_MAX_SEGMENT_SECONDS` seconds.
+- `AUDIO_SEGMENTATION_STRATEGY=silence`: try to cut near natural pauses before the
+  max segment length. The worker searches within
+  `AUDIO_SILENCE_SEARCH_WINDOW_SECONDS` seconds before the fixed boundary.
+- If no usable pause is found, silence mode falls back to fixed.
+- The price stays based on the original confirmed calculation. Actual segment count
+  may differ slightly after worker-side silence detection.
+
+Preview an audio segment plan locally without GPU:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/debug/audio/segment-plan \
+  -F "audio=@/path/to/audio.mp3"
+```
 
 Segment image strategies:
 
@@ -490,6 +527,16 @@ ComfyUI troubleshooting:
 - Visual drift over long videos: this is more likely with
   `SEGMENT_IMAGE_STRATEGY=last_frame`. Test `source_image` to trade continuity for
   identity stability.
+- No silences found: `AUDIO_SEGMENTATION_STRATEGY=silence` falls back to fixed
+  boundaries. Confirm with `POST /api/v1/debug/audio/segment-plan`.
+- Cuts happen too early: reduce `AUDIO_SILENCE_SEARCH_WINDOW_SECONDS` or increase
+  `AUDIO_SEGMENT_MIN_SECONDS`.
+- Cuts still happen mid-word: make detection more sensitive with
+  `AUDIO_SILENCE_THRESHOLD_DB=-40`, or require longer pauses with
+  `AUDIO_SILENCE_MIN_DURATION_SECONDS=0.4`.
+- Too many false pause candidates: make detection less sensitive with
+  `AUDIO_SILENCE_THRESHOLD_DB=-30`. Typical minimum duration values are `0.2` to
+  `0.5` seconds.
 - Segment failed: inspect `docker compose logs -f worker` and
   `GET /api/v1/debug/generation/jobs/{job_id}/segments`. The worker marks the job
   failed, marks unfinished segments failed, and refunds frozen balance.

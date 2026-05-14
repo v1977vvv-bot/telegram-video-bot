@@ -132,6 +132,8 @@ class DebugTelegramTestNotificationResponse(BaseModel):
 class DebugGenerationSegmentResponse(BaseModel):
     segment_index: int
     status: str
+    audio_start_seconds: Decimal
+    audio_end_seconds: Decimal
     duration_seconds: Decimal
     frame_count: int
     error_message: str | None
@@ -140,3 +142,18 @@ class DebugGenerationSegmentResponse(BaseModel):
 class DebugGenerationJobSegmentsResponse(BaseModel):
     job_id: UUID
     segments: list[DebugGenerationSegmentResponse]
+
+
+class DebugAudioSegmentPlanItemResponse(BaseModel):
+    index: int
+    start: Decimal
+    end: Decimal
+    duration: Decimal
+    reason: str
+
+
+class DebugAudioSegmentPlanResponse(BaseModel):
+    strategy: str
+    duration_seconds: Decimal
+    silences_found: int
+    segments: list[DebugAudioSegmentPlanItemResponse]

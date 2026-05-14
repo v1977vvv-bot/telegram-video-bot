@@ -27,7 +27,7 @@ from bot.app.services.backend_client import (
 )
 from bot.app.utils.text import safe_html
 from shared.app.config import get_settings
-from shared.app.enums import GenerationMode
+from shared.app.enums import AudioSegmentationStrategy, GenerationMode
 
 router = Router()
 backend_client = BotBackendClient()
@@ -282,7 +282,7 @@ def _format_confirmation(summary: GenerationFormatSummaryDto) -> str:
         f"Аудио: {summary.audio_duration_seconds} сек\n"
         f"Формат: {summary.width}×{summary.height}\n"
         f"FPS: {summary.fps}\n"
-        f"Сегментов: {summary.segments_count}\n"
+        f"{_segments_summary_line(summary.segments_count)}"
         f"Стоимость: ${_money(summary.price_usd)}\n\n"
         "Подтвердить генерацию?"
     )
@@ -290,6 +290,15 @@ def _format_confirmation(summary: GenerationFormatSummaryDto) -> str:
 
 def _money(value: Decimal) -> str:
     return f"{value.quantize(Decimal('0.0001'))}"
+
+
+def _segments_summary_line(segments_count: int) -> str:
+    strategy = get_settings().audio_segmentation_strategy.strip().lower()
+    if strategy == AudioSegmentationStrategy.SILENCE.value:
+        return (
+            f"Сегменты: примерно {segments_count}. Точные стыки будут выбраны по паузам в аудио.\n"
+        )
+    return f"Сегментов: {segments_count}\n"
 
 
 def _generation_mode_note(segments_count: int) -> str:

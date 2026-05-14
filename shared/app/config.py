@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     generation_fps: int = 25
     generation_max_segment_seconds: int = 30
     segment_image_strategy: str = "last_frame"
+    audio_segmentation_strategy: str = "fixed"
+    audio_silence_threshold_db: float = -35
+    audio_silence_min_duration_seconds: Decimal = Field(default=Decimal("0.30"))
+    audio_silence_search_window_seconds: Decimal = Field(default=Decimal("7"))
+    audio_segment_min_seconds: Decimal = Field(default=Decimal("8"))
     result_retention_hours: int = 48
 
     local_storage_dir: str = "/app/storage"

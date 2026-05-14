@@ -49,6 +49,11 @@ class SegmentImageStrategy(StrEnum):
     SOURCE_IMAGE = "source_image"
 
 
+class AudioSegmentationStrategy(StrEnum):
+    FIXED = "fixed"
+    SILENCE = "silence"
+
+
 class BalanceTransactionType(StrEnum):
     DEPOSIT = "deposit"
     ADMIN_ADJUSTMENT = "admin_adjustment"
