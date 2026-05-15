@@ -570,6 +570,8 @@ async def create_debug_runpod_pod(session: SessionDep) -> DebugRunPodCreatePodRe
     return DebugRunPodCreatePodResponse(
         pod=_runpod_pod_response(pod),
         selected_gpu_type=create_result["selected_gpu_type"],
+        selected_min_ram_gb=create_result["selected_min_ram_gb"],
+        selected_resource_phase=create_result["selected_resource_phase"],
         attempt=create_result["attempt"],
         tried_gpu_types=create_result["tried_gpu_types"],
     )
@@ -813,57 +815,92 @@ def _create_runpod_pod_with_fallback(settings) -> dict[str, Any]:
         tried_gpu_types: list[DebugRunPodGpuAttemptResponse] = []
         max_attempts = max(settings.runpod_create_max_attempts, 1)
         sleep_seconds = max(settings.runpod_create_retry_sleep_seconds, 0)
-        for attempt in range(1, max_attempts + 1):
+
+        for phase, min_ram_gb in _runpod_create_resource_phases(settings):
             logger.info(
-                "RunPod create attempt started attempt=%s max_attempts=%s",
-                attempt,
-                max_attempts,
+                "RunPod create phase started phase=%s min_ram_gb=%s",
+                phase,
+                min_ram_gb,
             )
-            for gpu_type in settings.runpod_allowed_gpu_type_list:
-                logger.info("RunPod debug create-pod requested gpu_type=%s", gpu_type)
-                try:
-                    info = client.create_pod(gpu_type)
-                except RunPodCapacityError as exc:
-                    error = _short_error(exc)
-                    logger.warning(
-                        "RunPod debug create-pod capacity unavailable gpu_type=%s "
-                        "attempt=%s error=%s",
+            for attempt in range(1, max_attempts + 1):
+                logger.info(
+                    "RunPod create attempt started phase=%s attempt=%s "
+                    "max_attempts=%s min_ram_gb=%s",
+                    phase,
+                    attempt,
+                    max_attempts,
+                    min_ram_gb,
+                )
+                for gpu_type in settings.runpod_allowed_gpu_type_list:
+                    logger.info(
+                        "RunPod debug create-pod requested gpu_type=%s min_ram_gb=%s " "phase=%s",
                         gpu_type,
-                        attempt,
-                        error,
+                        min_ram_gb,
+                        phase,
+                    )
+                    try:
+                        info = client.create_pod(gpu_type, min_ram_gb=min_ram_gb)
+                    except RunPodCapacityError as exc:
+                        error = _short_error(exc)
+                        logger.warning(
+                            "RunPod debug create-pod capacity unavailable phase=%s "
+                            "gpu_type=%s min_ram_gb=%s attempt=%s error=%s",
+                            phase,
+                            gpu_type,
+                            min_ram_gb,
+                            attempt,
+                            error,
+                        )
+                        tried_gpu_types.append(
+                            DebugRunPodGpuAttemptResponse(
+                                phase=phase,
+                                attempt=attempt,
+                                gpu_type=gpu_type,
+                                min_ram_gb=min_ram_gb,
+                                status="capacity_unavailable",
+                                error=error,
+                            )
+                        )
+                        continue
+
+                    logger.info(
+                        "RunPod pod created gpu_type=%s min_ram_gb=%s phase=%s",
+                        info.gpu_type or gpu_type,
+                        min_ram_gb,
+                        phase,
                     )
                     tried_gpu_types.append(
                         DebugRunPodGpuAttemptResponse(
+                            phase=phase,
                             attempt=attempt,
                             gpu_type=gpu_type,
-                            status="capacity_unavailable",
-                            error=error,
+                            min_ram_gb=min_ram_gb,
+                            status="created",
+                            error=None,
                         )
                     )
-                    continue
+                    return {
+                        "info": info,
+                        "selected_gpu_type": info.gpu_type or gpu_type,
+                        "selected_min_ram_gb": min_ram_gb,
+                        "selected_resource_phase": phase,
+                        "attempt": attempt,
+                        "tried_gpu_types": tried_gpu_types,
+                    }
 
-                tried_gpu_types.append(
-                    DebugRunPodGpuAttemptResponse(
-                        attempt=attempt,
-                        gpu_type=gpu_type,
-                        status="created",
-                        error=None,
+                if attempt < max_attempts:
+                    logger.warning(
+                        "RunPod retrying create after capacity errors phase=%s " "sleep_seconds=%s",
+                        phase,
+                        sleep_seconds,
                     )
-                )
-                return {
-                    "info": info,
-                    "selected_gpu_type": info.gpu_type or gpu_type,
-                    "attempt": attempt,
-                    "tried_gpu_types": tried_gpu_types,
-                }
+                    time.sleep(sleep_seconds)
 
-            if attempt < max_attempts:
-                logger.warning(
-                    "RunPod capacity unavailable for all GPU types, retrying after sleep "
-                    "sleep_seconds=%s",
-                    sleep_seconds,
-                )
-                time.sleep(sleep_seconds)
+            logger.warning(
+                "RunPod create phase exhausted phase=%s min_ram_gb=%s",
+                phase,
+                min_ram_gb,
+            )
 
         if tried_gpu_types:
             logger.warning("RunPod create attempts exhausted")
@@ -879,6 +916,13 @@ def _create_runpod_pod_with_fallback(settings) -> dict[str, Any]:
         raise RunPodError("No RunPod GPU types configured")
     finally:
         client.close()
+
+
+def _runpod_create_resource_phases(settings) -> list[tuple[str, int]]:
+    phases = [("primary", settings.runpod_min_ram_gb)]
+    if settings.runpod_ram_fallback_enabled and settings.runpod_fallback_min_ram_gb is not None:
+        phases.append(("fallback", settings.runpod_fallback_min_ram_gb))
+    return phases
 
 
 def _short_error(exc: Exception) -> str:

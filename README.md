@@ -190,6 +190,7 @@ RUNPOD_CLOUD_TYPE=COMMUNITY
 RUNPOD_ALLOWED_GPU_TYPES=NVIDIA GeForce RTX 5090,NVIDIA GeForce RTX 4090
 RUNPOD_MIN_VCPU=8
 RUNPOD_MIN_RAM_GB=48
+RUNPOD_FALLBACK_MIN_RAM_GB=48
 RUNPOD_CONTAINER_DISK_GB=50
 RUNPOD_VOLUME_DISK_GB=100
 RUNPOD_CUDA_VERSION=12.8
@@ -223,6 +224,21 @@ How it works:
 - On capacity errors, the manager retries pod creation up to
   `RUNPOD_CREATE_MAX_ATTEMPTS`, sleeping `RUNPOD_CREATE_RETRY_SLEEP_SECONDS` between
   full passes over `RUNPOD_ALLOWED_GPU_TYPES`.
+- RAM fallback is two-phase. The manager first exhausts all GPU types and all
+  `RUNPOD_CREATE_MAX_ATTEMPTS` with `RUNPOD_MIN_RAM_GB`. Only if those failures are
+  capacity errors and `RUNPOD_FALLBACK_MIN_RAM_GB < RUNPOD_MIN_RAM_GB`, it repeats the
+  full retry cycle with `RUNPOD_FALLBACK_MIN_RAM_GB`. A fallback such as `48` GB is an
+  emergency capacity fallback for MVP deployments where the workflow is known to run
+  with that RAM/GPU combination.
+
+Example fallback logs:
+
+```text
+RunPod create phase started phase=primary min_ram_gb=80
+RunPod create phase exhausted phase=primary min_ram_gb=80
+RunPod create phase started phase=fallback min_ram_gb=48
+RunPod pod created gpu_type=NVIDIA GeForce RTX 5090 min_ram_gb=48 phase=fallback
+```
 
 Debug commands:
 
@@ -659,11 +675,14 @@ ComfyUI troubleshooting:
   `RUNPOD_AUTO_TERMINATE=true`. Increase `RUNPOD_POD_READY_TIMEOUT_SECONDS` only if
   the template legitimately needs more boot time.
 - GPU unavailable: Stage 7 tries GPU types in `RUNPOD_ALLOWED_GPU_TYPES` order and
-  then fails the job with refund if no GPU can be provisioned. A waiting queue is a
-  later stage.
+  then fails the job with refund if no GPU can be provisioned. If
+  `RUNPOD_FALLBACK_MIN_RAM_GB` is lower than `RUNPOD_MIN_RAM_GB`, fallback RAM is tried
+  only after the primary RAM phase is fully exhausted by capacity errors. A waiting
+  queue is a later stage.
 - Debug `POST /api/v1/debug/runpod/create-pod` also tries GPU types in
-  `RUNPOD_ALLOWED_GPU_TYPES` order, applies the same create retry policy, and returns
-  `tried_gpu_types` for capacity failures.
+  `RUNPOD_ALLOWED_GPU_TYPES` order, applies the same create retry and RAM fallback
+  policy, and returns `phase`, `min_ram_gb`, and `tried_gpu_types` for capacity
+  failures.
 - Debug RunPod state with `GET /api/v1/debug/runpod/pods`; terminate a stuck pod with
   `DELETE /api/v1/debug/runpod/pods/{runpod_pod_id}`.
 - `No mp4 output found in ComfyUI history`: check that the workflow's

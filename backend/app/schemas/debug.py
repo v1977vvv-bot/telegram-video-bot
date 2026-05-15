@@ -184,8 +184,10 @@ class DebugRunPodPodsResponse(BaseModel):
 
 
 class DebugRunPodGpuAttemptResponse(BaseModel):
+    phase: str
     attempt: int
     gpu_type: str
+    min_ram_gb: int
     status: str
     error: str | None = None
 
@@ -193,6 +195,8 @@ class DebugRunPodGpuAttemptResponse(BaseModel):
 class DebugRunPodCreatePodResponse(BaseModel):
     pod: DebugRunPodPodResponse
     selected_gpu_type: str
+    selected_min_ram_gb: int | None = None
+    selected_resource_phase: str | None = None
     attempt: int
     tried_gpu_types: list[DebugRunPodGpuAttemptResponse]
 

@@ -62,20 +62,30 @@ class RunPodClient:
         if self._owns_client:
             self._client.close()
 
-    def create_pod(self, gpu_type: str) -> RunPodPodInfo:
-        payload = self.build_create_pod_payload(gpu_type)
-        logger.info("RunPod pod create requested gpu_type=%s", gpu_type)
+    def create_pod(self, gpu_type: str, min_ram_gb: int | None = None) -> RunPodPodInfo:
+        resolved_min_ram_gb = min_ram_gb or self._settings.runpod_min_ram_gb
+        payload = self.build_create_pod_payload(gpu_type, min_ram_gb=resolved_min_ram_gb)
+        logger.info(
+            "RunPod pod create requested gpu_type=%s min_ram_gb=%s",
+            gpu_type,
+            resolved_min_ram_gb,
+        )
         response = self._client.post("/pods", json=payload, headers=self._headers())
         if _is_capacity_error(response):
             body = _safe_response_body(response)
             details = f": {body}" if body else ""
             raise RunPodCapacityError(
-                f"RunPod capacity unavailable for gpu_type={gpu_type}: "
-                f"{_http_status_summary(response)}{details}"
+                f"RunPod capacity unavailable for gpu_type={gpu_type} "
+                f"min_ram_gb={resolved_min_ram_gb}: {_http_status_summary(response)}{details}"
             )
         self._raise_for_response(response, "RunPod pod create failed")
         info = self._pod_info_from_response(response.json(), fallback_gpu_type=gpu_type)
-        logger.info("RunPod pod created pod_id=%s gpu_type=%s", info.pod_id, gpu_type)
+        logger.info(
+            "RunPod pod created pod_id=%s gpu_type=%s min_ram_gb=%s",
+            info.pod_id,
+            gpu_type,
+            resolved_min_ram_gb,
+        )
         return info
 
     def get_pod(self, pod_id: str) -> RunPodPodInfo:
@@ -91,9 +101,15 @@ class RunPodClient:
         self._raise_for_response(response, "RunPod pod terminate failed")
         logger.info("RunPod pod terminate requested pod_id=%s", pod_id)
 
-    def build_create_pod_payload(self, gpu_type: str) -> dict[str, Any]:
+    def build_create_pod_payload(
+        self,
+        gpu_type: str,
+        *,
+        min_ram_gb: int | None = None,
+    ) -> dict[str, Any]:
         """Build the RunPod /pods payload without Network Volume fields."""
 
+        resolved_min_ram_gb = min_ram_gb or self._settings.runpod_min_ram_gb
         payload: dict[str, Any] = {
             "name": f"ultronlab-comfyui-{uuid4().hex[:8]}",
             "cloudType": self._settings.runpod_cloud_type,
@@ -104,7 +120,7 @@ class RunPodClient:
             "containerDiskInGb": self._settings.runpod_container_disk_gb,
             "volumeInGb": self._settings.runpod_volume_disk_gb,
             "minVCPUPerGPU": self._settings.runpod_min_vcpu,
-            "minRAMPerGPU": self._settings.runpod_min_ram_gb,
+            "minRAMPerGPU": resolved_min_ram_gb,
             "ports": [f"{self._settings.runpod_comfyui_port}/http"],
             "supportPublicIp": True,
         }

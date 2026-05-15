@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     runpod_allowed_gpu_types: str = "NVIDIA GeForce RTX 5090,NVIDIA GeForce RTX 4090"
     runpod_min_vcpu: int = 8
     runpod_min_ram_gb: int = 48
+    runpod_fallback_min_ram_gb: int | None = 48
     runpod_container_disk_gb: int = 50
     runpod_volume_disk_gb: int = 100
     runpod_cuda_version: str = "12.8"
@@ -167,6 +168,14 @@ class Settings(BaseSettings):
         template_id = self.runpod_template_id.strip()
         return bool(
             api_key and api_key != "change_me" and template_id and template_id != "change_me"
+        )
+
+    @property
+    def runpod_ram_fallback_enabled(self) -> bool:
+        return (
+            self.runpod_fallback_min_ram_gb is not None
+            and self.runpod_fallback_min_ram_gb > 0
+            and self.runpod_fallback_min_ram_gb < self.runpod_min_ram_gb
         )
 
 
