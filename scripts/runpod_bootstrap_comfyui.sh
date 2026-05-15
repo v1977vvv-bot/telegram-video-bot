@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-COMFYUI_DIR="${COMFYUI_DIR:-/workspace/ComfyUI}"
+COMFYUI_DIR="${COMFYUI_DIR:-}"
 COMFYUI_PORT="${COMFYUI_PORT:-8188}"
 COMFYUI_EXTRA_ARGS="${COMFYUI_EXTRA_ARGS:---use-sage-attention}"
 SKIP_MODEL_DOWNLOADS="${SKIP_MODEL_DOWNLOADS:-false}"
@@ -14,6 +14,65 @@ log() {
 
 error() {
   echo "[bootstrap] ERROR: $*" >&2
+}
+
+is_valid_comfyui_dir() {
+  local dir="$1"
+  local markers=0
+
+  [ -f "$dir/main.py" ] || return 1
+  [ -d "$dir/comfy" ] && markers=$((markers + 1))
+  [ -d "$dir/custom_nodes" ] && markers=$((markers + 1))
+  [ -f "$dir/nodes.py" ] && markers=$((markers + 1))
+  [ -f "$dir/execution.py" ] && markers=$((markers + 1))
+  [ -f "$dir/server.py" ] && markers=$((markers + 1))
+
+  [ "$markers" -ge 3 ]
+}
+
+detect_comfyui_dir() {
+  local candidates=(
+    "/workspace/ComfyUI"
+    "/workspace/comfyui"
+    "/ComfyUI"
+    "/comfyui"
+    "/app/ComfyUI"
+    "/app/comfyui"
+    "/root/ComfyUI"
+    "/root/comfyui"
+  )
+  local candidate
+  local searched
+  local found_candidates
+
+  searched="${candidates[*]}"
+  for candidate in "${candidates[@]}"; do
+    if is_valid_comfyui_dir "$candidate"; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  found_candidates="$(
+    find / -type d \( -iname "ComfyUI" -o -iname "comfyui" \) \
+      -not -path "*/site-packages/*" \
+      -not -path "*/.venv/*" \
+      -not -path "*/venv/*" \
+      2>/dev/null || true
+  )"
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    searched="${searched} ${candidate}"
+    if is_valid_comfyui_dir "$candidate"; then
+      echo "$candidate"
+      return 0
+    fi
+  done <<<"$found_candidates"
+
+  error "ComfyUI directory not found."
+  error "Searched candidates: $searched"
+  exit 1
 }
 
 is_true() {
@@ -113,9 +172,14 @@ start_comfyui() {
   exec "$python_bin" main.py --listen 0.0.0.0 --port "$COMFYUI_PORT" $COMFYUI_EXTRA_ARGS
 }
 
-if [ ! -f "$COMFYUI_DIR/main.py" ]; then
-  error "ComfyUI main.py not found at ${COMFYUI_DIR}/main.py"
-  exit 1
+if [ -n "$COMFYUI_DIR" ]; then
+  if ! is_valid_comfyui_dir "$COMFYUI_DIR"; then
+    error "Invalid ComfyUI directory: $COMFYUI_DIR"
+    error "Expected main.py plus ComfyUI markers: comfy/, custom_nodes/, nodes.py, execution.py, server.py"
+    exit 1
+  fi
+else
+  COMFYUI_DIR="$(detect_comfyui_dir)"
 fi
 
 MODEL_DIRS=(

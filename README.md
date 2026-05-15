@@ -241,7 +241,9 @@ intermediate no-Network-Volume and no-custom-image bootstrap path.
 
 The script:
 
-- checks that `COMFYUI_DIR/main.py` exists;
+- auto-detects `COMFYUI_DIR` when the env var is not set;
+- validates ComfyUI by checking `main.py` plus structural markers such as `comfy/`,
+  `custom_nodes/`, `nodes.py`, `execution.py`, and `server.py`;
 - creates all required model directories;
 - downloads missing model files;
 - deletes and redownloads zero-byte files;
@@ -256,7 +258,7 @@ solution should be a custom Docker image or reliable persistent storage.
 Supported bootstrap env:
 
 ```env
-COMFYUI_DIR=/workspace/ComfyUI
+COMFYUI_DIR=
 COMFYUI_PORT=8188
 COMFYUI_EXTRA_ARGS=--use-sage-attention
 SKIP_MODEL_DOWNLOADS=false
@@ -278,6 +280,11 @@ curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/scripts/runpod_boot
 ```
 
 Replace `OWNER/REPO` after the repository is published.
+
+When `COMFYUI_DIR` is not set, the script first checks common paths such as
+`/workspace/ComfyUI`, `/ComfyUI`, `/app/ComfyUI`, and `/root/ComfyUI`. If none are
+valid, it searches only directories named `ComfyUI` or `comfyui` and still validates
+their structure. It does not select arbitrary `main.py` files from Python packages.
 
 Manual check inside a RunPod terminal:
 
