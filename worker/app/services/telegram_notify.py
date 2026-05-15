@@ -59,6 +59,15 @@ class TelegramNotifyService:
         )
         return self._send_message(notification.telegram_id, text)
 
+    def send_generation_waiting_for_gpu(self, notification: GenerationNotification) -> bool:
+        text = (
+            "⏳ GPU сейчас недоступен\n\n"
+            f"ID: {_short_id(notification.job_id)}\n"
+            "Задача поставлена в очередь. Средства пока не списаны.\n"
+            "Мы попробуем снова автоматически."
+        )
+        return self._send_message(notification.telegram_id, text)
+
     def send_debug_message(self, *, telegram_id: int, message: str) -> bool:
         return self._send_message(telegram_id, safe_html(message, max_len=1000))
 

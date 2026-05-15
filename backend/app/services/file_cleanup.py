@@ -15,6 +15,7 @@ from shared.app.enums import JobStatus
 ACTIVE_JOB_STATUSES = {
     JobStatus.DRAFT.value,
     JobStatus.QUEUED.value,
+    JobStatus.WAITING_FOR_GPU.value,
     JobStatus.POD_STARTING.value,
     JobStatus.UPLOADING_INPUTS.value,
     JobStatus.GENERATING.value,

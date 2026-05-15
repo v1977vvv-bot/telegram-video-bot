@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     runpod_auto_terminate: bool = True
     runpod_create_max_attempts: int = 3
     runpod_create_retry_sleep_seconds: int = 20
+    runpod_waiting_gpu_enabled: bool = True
+    runpod_waiting_gpu_retry_seconds: int = 120
+    runpod_waiting_gpu_max_wait_minutes: int = 30
 
     generation_mode: str = "mock"
     comfyui_port: int = 8188

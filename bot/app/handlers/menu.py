@@ -26,6 +26,7 @@ MENU_BUTTONS_WITHOUT_GENERATION = tuple(
 STATUS_DISPLAY = {
     "draft": "📝 черновик",
     "queued": "⏳ в очереди",
+    "waiting_for_gpu": "⏳ ожидает GPU",
     "generating": "🎬 генерируется",
     "completed": "✅ готово",
     "failed": "❌ ошибка",
@@ -197,6 +198,10 @@ def _format_generation_item(index: int, item: GenerationHistoryItemDto) -> str:
         result += f"\nРезультат: {safe_html(item.mock_result_message, max_len=300)}"
     elif item.status == "failed" and item.error_message:
         result += f"\nОшибка: {safe_html(item.error_message, max_len=300)}"
+    elif item.status == "waiting_for_gpu":
+        result += (
+            "\nРезультат: ⏳ Ожидаем доступный GPU. " "Задача в очереди, средства пока не списаны."
+        )
     elif item.status in {"queued", "generating"}:
         result += "\nРезультат: ещё не готов"
     return result

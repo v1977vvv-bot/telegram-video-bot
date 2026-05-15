@@ -201,6 +201,9 @@ RUNPOD_HEALTHCHECK_INTERVAL_SECONDS=10
 RUNPOD_AUTO_TERMINATE=true
 RUNPOD_CREATE_MAX_ATTEMPTS=3
 RUNPOD_CREATE_RETRY_SLEEP_SECONDS=20
+RUNPOD_WAITING_GPU_ENABLED=true
+RUNPOD_WAITING_GPU_RETRY_SECONDS=120
+RUNPOD_WAITING_GPU_MAX_WAIT_MINUTES=30
 ```
 
 How it works:
@@ -219,8 +222,9 @@ How it works:
   `https://{runpod_pod_id}-{RUNPOD_COMFYUI_PORT}.proxy.runpod.net`.
 - If ComfyUI does not become healthy before `RUNPOD_POD_READY_TIMEOUT_SECONDS`, the pod
   is marked failed and terminated when `RUNPOD_AUTO_TERMINATE=true`.
-- Stage 7 uses one active pod and one local worker process. If GPU capacity is
-  unavailable, the job fails with a clear message and frozen balance is refunded.
+- Stage 8.1 still uses one active pod and one local worker process. If GPU capacity is
+  unavailable and waiting is enabled, the job moves to `waiting_for_gpu`; otherwise it
+  fails with a clear message and frozen balance is refunded.
 - On capacity errors, the manager retries pod creation up to
   `RUNPOD_CREATE_MAX_ATTEMPTS`, sleeping `RUNPOD_CREATE_RETRY_SLEEP_SECONDS` between
   full passes over `RUNPOD_ALLOWED_GPU_TYPES`.
@@ -230,6 +234,11 @@ How it works:
   full retry cycle with `RUNPOD_FALLBACK_MIN_RAM_GB`. A fallback such as `48` GB is an
   emergency capacity fallback for MVP deployments where the workflow is known to run
   with that RAM/GPU combination.
+- Capacity exhaustion can put a job into `waiting_for_gpu` instead of failing. In this
+  state the user's balance remains frozen, no capture/refund happens, and the worker
+  schedules `retry_waiting_for_gpu_jobs` after `RUNPOD_WAITING_GPU_RETRY_SECONDS`.
+  If the job waits longer than `RUNPOD_WAITING_GPU_MAX_WAIT_MINUTES`, the next capacity
+  failure marks it failed and refunds the frozen balance.
 
 Example fallback logs:
 
@@ -247,6 +256,7 @@ curl http://localhost:8000/api/v1/debug/runpod/pods
 curl -X POST http://localhost:8000/api/v1/debug/runpod/create-pod
 curl -X POST http://localhost:8000/api/v1/debug/runpod/cleanup-idle
 curl -X DELETE http://localhost:8000/api/v1/debug/runpod/pods/{runpod_pod_id}
+curl -X POST http://localhost:8000/api/v1/debug/generation/retry-waiting-gpu
 ```
 
 ## Stage 7.1 - RunPod bootstrap script
@@ -675,10 +685,14 @@ ComfyUI troubleshooting:
   `RUNPOD_AUTO_TERMINATE=true`. Increase `RUNPOD_POD_READY_TIMEOUT_SECONDS` only if
   the template legitimately needs more boot time.
 - GPU unavailable: Stage 7 tries GPU types in `RUNPOD_ALLOWED_GPU_TYPES` order and
-  then fails the job with refund if no GPU can be provisioned. If
+  puts the job into `waiting_for_gpu` when `RUNPOD_WAITING_GPU_ENABLED=true`. If
   `RUNPOD_FALLBACK_MIN_RAM_GB` is lower than `RUNPOD_MIN_RAM_GB`, fallback RAM is tried
-  only after the primary RAM phase is fully exhausted by capacity errors. A waiting
-  queue is a later stage.
+  only after the primary RAM phase is fully exhausted by capacity errors. If waiting is
+  disabled, or the max wait is exceeded, the job fails with refund.
+- Waiting GPU jobs can be inspected with `GET /api/v1/debug/generation/jobs?limit=20`.
+  Manual local retry is available through
+  `POST /api/v1/debug/generation/retry-waiting-gpu`; it changes eligible
+  `waiting_for_gpu` jobs back to `queued` and enqueues `process_generation_job`.
 - Debug `POST /api/v1/debug/runpod/create-pod` also tries GPU types in
   `RUNPOD_ALLOWED_GPU_TYPES` order, applies the same create retry and RAM fallback
   policy, and returns `phase`, `min_ram_gb`, and `tried_gpu_types` for capacity

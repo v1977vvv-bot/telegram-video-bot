@@ -53,6 +53,8 @@ class GenerationJob(TimestampMixin, Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    waiting_for_gpu_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship("User", back_populates="generation_jobs")
     segments: Mapped[list[GenerationSegment]] = relationship(

@@ -45,6 +45,7 @@ from backend.app.schemas.debug import (
     DebugLedgerJobResponse,
     DebugLedgerTransactionResponse,
     DebugRepairFrozenBalancesResponse,
+    DebugRetryWaitingGpuResponse,
     DebugRunPodCleanupResponse,
     DebugRunPodCreatePodResponse,
     DebugRunPodDeleteResponse,
@@ -84,6 +85,7 @@ MONEY_QUANT = Decimal("0.0001")
 logger = logging.getLogger(__name__)
 ACTIVE_GENERATION_JOB_STATUSES = {
     JobStatus.QUEUED.value,
+    JobStatus.WAITING_FOR_GPU.value,
     JobStatus.POD_STARTING.value,
     JobStatus.UPLOADING_INPUTS.value,
     JobStatus.GENERATING.value,
@@ -645,6 +647,43 @@ async def fail_refund_debug_generation_job(
     return DebugFailRefundGenerationJobResponse(**result)
 
 
+@router.post("/generation/retry-waiting-gpu", response_model=DebugRetryWaitingGpuResponse)
+async def retry_debug_waiting_gpu_jobs(
+    session: SessionDep,
+    limit: int = 20,
+) -> DebugRetryWaitingGpuResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    now = datetime.now(UTC)
+    safe_limit = max(1, min(limit, 100))
+    async with session.begin():
+        result = await session.execute(
+            select(GenerationJob)
+            .where(
+                GenerationJob.status == JobStatus.WAITING_FOR_GPU.value,
+                or_(GenerationJob.next_retry_at.is_(None), GenerationJob.next_retry_at <= now),
+            )
+            .order_by(
+                GenerationJob.next_retry_at.asc().nullsfirst(), GenerationJob.created_at.asc()
+            )
+            .limit(safe_limit)
+            .with_for_update(skip_locked=True)
+        )
+        jobs = list(result.scalars())
+        job_ids = [job.id for job in jobs]
+        next_retry_at = now + timedelta(seconds=max(settings.runpod_waiting_gpu_retry_seconds, 1))
+        for job in jobs:
+            job.status = JobStatus.QUEUED.value
+            job.queued_at = now
+            job.next_retry_at = next_retry_at
+
+    for job_id in job_ids:
+        enqueue_generation_job(str(job_id))
+
+    return DebugRetryWaitingGpuResponse(enqueued=len(job_ids), job_ids=job_ids)
+
+
 @router.get("/generation/jobs", response_model=DebugGenerationJobsResponse)
 async def list_debug_generation_jobs(
     session: SessionDep,
@@ -673,6 +712,8 @@ async def list_debug_generation_jobs(
                 updated_at=job.updated_at,
                 price_usd=job.price_usd,
                 cost_usd=job.cost_usd,
+                waiting_for_gpu_since=job.waiting_for_gpu_since,
+                next_retry_at=job.next_retry_at,
                 refunded=ledger.get("refunded", False),
                 captured=ledger.get("captured", False),
                 runpod_pod_id=pod.runpod_pod_id if pod else None,

@@ -4,7 +4,7 @@ import logging
 import shutil
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from uuid import UUID
@@ -28,6 +28,7 @@ from worker.app.database import get_worker_session
 from worker.app.services.audio import AudioSegmentFile, AudioSegmentPlan, AudioService
 from worker.app.services.balance import SyncBalanceService
 from worker.app.services.comfyui_client import ComfyUIClient
+from worker.app.services.runpod import NoGpuAvailableError
 from worker.app.services.runpod_manager import ManagedComfyUIEndpoint, RunPodManager
 from worker.app.services.storage import WorkerStorageService
 from worker.app.services.telegram_notify import GenerationNotification, TelegramNotifyService
@@ -71,10 +72,22 @@ class ComfyUISegmentContext:
     frame_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class WaitingGpuResult:
+    status: str
+    notification: GenerationNotification | None = None
+
+
 @celery_app.task(name="process_generation_job")
 def process_generation_job(job_id: str) -> dict[str, str]:
     logger.info("process_generation_job started job_id=%s", job_id)
     return _process_generation_job(UUID(job_id))
+
+
+@celery_app.task(name="retry_waiting_for_gpu_jobs")
+def retry_waiting_for_gpu_jobs(limit: int = 50) -> dict[str, object]:
+    logger.info("retry_waiting_for_gpu_jobs started limit=%s", limit)
+    return _retry_waiting_for_gpu_jobs(limit)
 
 
 def _process_generation_job(job_id: UUID) -> dict[str, str]:
@@ -163,6 +176,7 @@ def _run_mock_generation(job_id: UUID) -> dict[str, str]:
             job.output_file_id = result_file.id
             job.status = JobStatus.COMPLETED.value
             job.completed_at = datetime.now(UTC)
+            job.next_retry_at = None
             job.mock_result_message = "Mock generation completed successfully"
             job.error_message = None
             notification = GenerationNotification(
@@ -194,8 +208,25 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
     client: ComfyUIClient | None = None
     runpod_manager = RunPodManager(settings)
     try:
-        with get_worker_session() as session:
-            endpoint = runpod_manager.ensure_comfyui_endpoint(session, job_id=job_id)
+        try:
+            with get_worker_session() as session:
+                endpoint = runpod_manager.ensure_comfyui_endpoint(session, job_id=job_id)
+        except NoGpuAvailableError as exc:
+            if not settings.runpod_waiting_gpu_enabled:
+                raise
+            wait_result = _handle_no_gpu_available(job_id, settings, _safe_error_message(exc))
+            if wait_result.status == JobStatus.WAITING_FOR_GPU.value:
+                _notify_generation_waiting_for_gpu(wait_result.notification)
+                _schedule_waiting_gpu_retry(settings)
+                return {"status": JobStatus.WAITING_FOR_GPU.value, "job_id": str(job_id)}
+
+            notification = _mark_job_failed(
+                job_id,
+                "GPU unavailable for too long. Funds returned.",
+            )
+            _notify_generation_failed(notification)
+            return {"status": JobStatus.FAILED.value, "job_id": str(job_id)}
+
         client = ComfyUIClient(settings, base_url=endpoint.base_url)
 
         with get_worker_session() as session:
@@ -328,6 +359,114 @@ def _release_runpod_endpoint_after_failure(
         logger.warning("RunPod pod failure release failed pod_id=%s", endpoint.runpod_pod_id)
 
 
+def _handle_no_gpu_available(
+    job_id: UUID,
+    settings: Settings,
+    error_message: str,
+) -> WaitingGpuResult:
+    now = datetime.now(UTC)
+    retry_seconds = max(settings.runpod_waiting_gpu_retry_seconds, 1)
+    max_wait = timedelta(minutes=max(settings.runpod_waiting_gpu_max_wait_minutes, 0))
+
+    with get_worker_session() as session:
+        with session.begin():
+            job = _get_job(session, job_id, with_segments=False, for_update=True)
+            if job is None:
+                raise JobNotFoundError(f"Generation job not found job_id={job_id}")
+            if job.status in {
+                JobStatus.COMPLETED.value,
+                JobStatus.CANCELLED.value,
+                JobStatus.FAILED.value,
+            }:
+                raise JobSkippedError(job.status)
+
+            waiting_since = job.waiting_for_gpu_since or now
+            if max_wait <= timedelta(0) or now - waiting_since >= max_wait:
+                logger.warning(
+                    "RunPod GPU wait exceeded max wait job_id=%s waiting_since=%s "
+                    "max_wait_minutes=%s",
+                    job_id,
+                    waiting_since,
+                    settings.runpod_waiting_gpu_max_wait_minutes,
+                )
+                return WaitingGpuResult(status="expired")
+
+            next_retry_at = now + timedelta(seconds=retry_seconds)
+            job.status = JobStatus.WAITING_FOR_GPU.value
+            job.waiting_for_gpu_since = waiting_since
+            job.next_retry_at = next_retry_at
+            job.error_message = (
+                "GPU temporarily unavailable. Waiting for automatic retry. "
+                f"Last capacity error: {error_message}"
+            )
+            logger.info(
+                "Generation job moved to waiting_for_gpu job_id=%s next_retry_at=%s",
+                job_id,
+                next_retry_at,
+            )
+            return WaitingGpuResult(
+                status=JobStatus.WAITING_FOR_GPU.value,
+                notification=GenerationNotification(
+                    telegram_id=job.user.telegram_id,
+                    job_id=job.id,
+                    audio_duration_seconds=job.audio_duration_seconds,
+                    price_usd=job.price_usd,
+                    segments_count=job.segments_count,
+                    funds_returned=False,
+                ),
+            )
+
+
+def _schedule_waiting_gpu_retry(settings: Settings) -> None:
+    countdown = max(settings.runpod_waiting_gpu_retry_seconds, 1)
+    try:
+        retry_waiting_for_gpu_jobs.apply_async(countdown=countdown)
+    except Exception:
+        logger.warning("Waiting GPU retry scheduling failed")
+
+
+def _retry_waiting_for_gpu_jobs(limit: int = 50) -> dict[str, object]:
+    now = datetime.now(UTC)
+    safe_limit = max(1, min(limit, 100))
+    job_ids: list[UUID] = []
+    settings = get_settings()
+    next_retry_at = now + timedelta(seconds=max(settings.runpod_waiting_gpu_retry_seconds, 1))
+    with get_worker_session() as session:
+        with session.begin():
+            result = session.execute(
+                select(GenerationJob)
+                .where(
+                    GenerationJob.status == JobStatus.WAITING_FOR_GPU.value,
+                    (
+                        (GenerationJob.next_retry_at.is_(None))
+                        | (GenerationJob.next_retry_at <= now)
+                    ),
+                )
+                .order_by(
+                    GenerationJob.next_retry_at.asc().nullsfirst(),
+                    GenerationJob.created_at.asc(),
+                )
+                .limit(safe_limit)
+                .with_for_update(skip_locked=True)
+            )
+            jobs = list(result.scalars())
+            for job in jobs:
+                job.status = JobStatus.QUEUED.value
+                job.queued_at = now
+                job.next_retry_at = next_retry_at
+                job_ids.append(job.id)
+
+    for job_id in job_ids:
+        process_generation_job.delay(str(job_id))
+
+    logger.info("retry_waiting_for_gpu_jobs enqueued jobs count=%s", len(job_ids))
+    return {
+        "status": "ok",
+        "enqueued": len(job_ids),
+        "job_ids": [str(job_id) for job_id in job_ids],
+    }
+
+
 def _start_comfyui_job(job_id: UUID, settings: Settings) -> ComfyUIJobContext:
     with get_worker_session() as session:
         with session.begin():
@@ -353,6 +492,7 @@ def _start_comfyui_job(job_id: UUID, settings: Settings) -> ComfyUIJobContext:
             now = datetime.now(UTC)
             job.status = JobStatus.GENERATING.value
             job.started_at = now
+            job.next_retry_at = None
 
             logger.info(
                 "ComfyUI segmented plan job_id=%s audio_duration_seconds=%s fps=%s "
@@ -798,6 +938,7 @@ def _complete_comfyui_job(
             job.output_file_id = result_file.id
             job.status = JobStatus.COMPLETED.value
             job.completed_at = now
+            job.next_retry_at = None
             job.mock_result_message = "ComfyUI generation completed successfully"
             job.error_message = None
             for segment in job.segments:
@@ -836,6 +977,7 @@ def _mark_job_failed(job_id: UUID, error_message: str) -> GenerationNotification
             funds_returned = False
             if job.price_usd is not None and job.status in {
                 JobStatus.QUEUED.value,
+                JobStatus.WAITING_FOR_GPU.value,
                 JobStatus.GENERATING.value,
             }:
                 try:
@@ -856,6 +998,7 @@ def _mark_job_failed(job_id: UUID, error_message: str) -> GenerationNotification
             else:
                 job.error_message = error_message
             job.completed_at = datetime.now(UTC)
+            job.next_retry_at = None
 
             result = session.execute(
                 select(GenerationSegment).where(GenerationSegment.job_id == job.id)
@@ -898,6 +1041,17 @@ def _notify_generation_failed(notification: GenerationNotification | None) -> No
         TelegramNotifyService().send_generation_failed(notification)
     except Exception:
         logger.warning("Generation failure notification failed job_id=%s", notification.job_id)
+
+
+def _notify_generation_waiting_for_gpu(notification: GenerationNotification | None) -> None:
+    if notification is None:
+        return
+    try:
+        TelegramNotifyService().send_generation_waiting_for_gpu(notification)
+    except Exception:
+        logger.warning(
+            "Generation waiting-for-GPU notification failed job_id=%s", notification.job_id
+        )
 
 
 def _safe_error_message(exc: Exception) -> str:

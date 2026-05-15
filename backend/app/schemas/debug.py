@@ -227,6 +227,8 @@ class DebugGenerationJobListItemResponse(BaseModel):
     updated_at: datetime
     price_usd: Decimal | None
     cost_usd: Decimal | None
+    waiting_for_gpu_since: datetime | None
+    next_retry_at: datetime | None
     refunded: bool
     captured: bool
     runpod_pod_id: str | None
@@ -235,3 +237,8 @@ class DebugGenerationJobListItemResponse(BaseModel):
 
 class DebugGenerationJobsResponse(BaseModel):
     items: list[DebugGenerationJobListItemResponse]
+
+
+class DebugRetryWaitingGpuResponse(BaseModel):
+    enqueued: int
+    job_ids: list[UUID]
