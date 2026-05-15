@@ -649,6 +649,8 @@ ComfyUI troubleshooting:
 - GPU unavailable: Stage 7 tries GPU types in `RUNPOD_ALLOWED_GPU_TYPES` order and
   then fails the job with refund if no GPU can be provisioned. A waiting queue is a
   later stage.
+- Debug `POST /api/v1/debug/runpod/create-pod` also tries GPU types in
+  `RUNPOD_ALLOWED_GPU_TYPES` order and returns `tried_gpu_types` for capacity failures.
 - Debug RunPod state with `GET /api/v1/debug/runpod/pods`; terminate a stuck pod with
   `DELETE /api/v1/debug/runpod/pods/{runpod_pod_id}`.
 - `No mp4 output found in ComfyUI history`: check that the workflow's

@@ -67,9 +67,11 @@ class RunPodClient:
         logger.info("RunPod pod create requested gpu_type=%s", gpu_type)
         response = self._client.post("/pods", json=payload, headers=self._headers())
         if _is_capacity_error(response):
+            body = _safe_response_body(response)
+            details = f": {body}" if body else ""
             raise RunPodCapacityError(
                 f"RunPod capacity unavailable for gpu_type={gpu_type}: "
-                f"{_http_status_summary(response)}"
+                f"{_http_status_summary(response)}{details}"
             )
         self._raise_for_response(response, "RunPod pod create failed")
         info = self._pod_info_from_response(response.json(), fallback_gpu_type=gpu_type)
@@ -193,7 +195,7 @@ def _nested_first_string(data: dict[str, Any], *paths: tuple[str, ...]) -> str |
 
 
 def _is_capacity_error(response: httpx.Response) -> bool:
-    if response.status_code not in {400, 409, 422, 429, 503}:
+    if response.status_code not in {400, 409, 422, 429, 500, 502, 503}:
         return False
     body = _safe_response_body(response).lower()
     return any(
@@ -205,6 +207,8 @@ def _is_capacity_error(response: httpx.Response) -> bool:
             "no gpu",
             "not enough",
             "no instances",
+            "no instances currently available",
+            "instances currently available",
         )
     )
 

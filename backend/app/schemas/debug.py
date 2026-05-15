@@ -183,8 +183,16 @@ class DebugRunPodPodsResponse(BaseModel):
     pods: list[DebugRunPodPodResponse]
 
 
+class DebugRunPodGpuAttemptResponse(BaseModel):
+    gpu_type: str
+    status: str
+    error: str | None = None
+
+
 class DebugRunPodCreatePodResponse(BaseModel):
     pod: DebugRunPodPodResponse
+    selected_gpu_type: str
+    tried_gpu_types: list[DebugRunPodGpuAttemptResponse]
 
 
 class DebugRunPodDeleteResponse(BaseModel):

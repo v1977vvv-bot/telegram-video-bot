@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -10,7 +11,7 @@ from uuid import UUID
 
 import anyio
 import httpx
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,6 +43,7 @@ from backend.app.schemas.debug import (
     DebugRunPodCleanupResponse,
     DebugRunPodCreatePodResponse,
     DebugRunPodDeleteResponse,
+    DebugRunPodGpuAttemptResponse,
     DebugRunPodPodResponse,
     DebugRunPodPodsResponse,
     DebugStorageCleanupResponse,
@@ -64,7 +66,7 @@ from shared.app.database import get_session
 from shared.app.enums import BalanceTransactionType, FileType, JobStatus, SegmentStatus
 from shared.app.exceptions import AppError
 from worker.app.services.audio import AudioService as WorkerAudioService
-from worker.app.services.runpod import RunPodCapacityError, RunPodClient, RunPodError, RunPodPodInfo
+from worker.app.services.runpod import RunPodCapacityError, RunPodClient, RunPodError
 from worker.app.services.workflow_patcher import (
     WorkflowPatchError,
     preview_infinite_talk_patch_values,
@@ -74,6 +76,7 @@ from worker.app.services.workflow_patcher import (
 router = APIRouter(prefix="/debug", tags=["debug"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 MONEY_QUANT = Decimal("0.0001")
+logger = logging.getLogger(__name__)
 
 
 @router.post("/enqueue-ping", response_model=DebugTaskResponse)
@@ -519,11 +522,16 @@ async def create_debug_runpod_pod(session: SessionDep) -> DebugRunPodCreatePodRe
         )
 
     try:
-        info = await anyio.to_thread.run_sync(lambda: _create_runpod_pod_with_fallback(settings))
+        create_result = await anyio.to_thread.run_sync(
+            lambda: _create_runpod_pod_with_fallback(settings)
+        )
     except RunPodError as exc:
         raise AppError(str(exc), code="runpod_create_failed", status_code=502) from exc
+    except HTTPException:
+        raise
 
     async with session.begin():
+        info = create_result["info"]
         pod = RunpodPod(
             provider_pod_id=info.pod_id,
             runpod_pod_id=info.pod_id,
@@ -539,7 +547,11 @@ async def create_debug_runpod_pod(session: SessionDep) -> DebugRunPodCreatePodRe
         session.add(pod)
         await session.flush()
 
-    return DebugRunPodCreatePodResponse(pod=_runpod_pod_response(pod))
+    return DebugRunPodCreatePodResponse(
+        pod=_runpod_pod_response(pod),
+        selected_gpu_type=create_result["selected_gpu_type"],
+        tried_gpu_types=create_result["tried_gpu_types"],
+    )
 
 
 @router.delete("/runpod/pods/{runpod_pod_id}", response_model=DebugRunPodDeleteResponse)
@@ -702,23 +714,58 @@ async def preview_debug_comfyui_workflow_patch(
     return DebugComfyUIPatchWorkflowPreviewResponse(nodes=result["nodes"])
 
 
-def _create_runpod_pod_with_fallback(settings) -> RunPodPodInfo:
+def _create_runpod_pod_with_fallback(settings) -> dict[str, Any]:
     client = RunPodClient(settings)
     try:
-        last_error: Exception | None = None
+        tried_gpu_types: list[DebugRunPodGpuAttemptResponse] = []
         for gpu_type in settings.runpod_allowed_gpu_type_list:
+            logger.info("RunPod debug create-pod requested gpu_type=%s", gpu_type)
             try:
-                return client.create_pod(gpu_type)
+                info = client.create_pod(gpu_type)
             except RunPodCapacityError as exc:
-                last_error = exc
+                error = _short_error(exc)
+                logger.warning(
+                    "RunPod debug create-pod capacity unavailable gpu_type=%s error=%s",
+                    gpu_type,
+                    error,
+                )
+                tried_gpu_types.append(
+                    DebugRunPodGpuAttemptResponse(
+                        gpu_type=gpu_type,
+                        status="capacity_unavailable",
+                        error=error,
+                    )
+                )
                 continue
-        if last_error is not None:
-            raise RunPodError(
-                "GPU temporarily unavailable. Please try again later."
-            ) from last_error
+
+            tried_gpu_types.append(
+                DebugRunPodGpuAttemptResponse(
+                    gpu_type=gpu_type,
+                    status="created",
+                    error=None,
+                )
+            )
+            return {
+                "info": info,
+                "selected_gpu_type": info.gpu_type or gpu_type,
+                "tried_gpu_types": tried_gpu_types,
+            }
+
+        if tried_gpu_types:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "No RunPod instances available for configured GPU types",
+                    "tried_gpu_types": [attempt.model_dump() for attempt in tried_gpu_types],
+                },
+            )
         raise RunPodError("No RunPod GPU types configured")
     finally:
         client.close()
+
+
+def _short_error(exc: Exception) -> str:
+    return " ".join(str(exc).split())[:500]
 
 
 def _terminate_runpod_pod(settings, runpod_pod_id: str) -> None:
