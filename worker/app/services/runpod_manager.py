@@ -57,18 +57,30 @@ class RunPodManager:
                 managed=False,
             )
 
-        existing = self._get_existing_ready_or_idle_pod(session)
+        existing_pods = self._get_reusable_existing_pods(session)
         session.commit()
-        if existing is not None and existing.base_url is not None:
+        for existing in existing_pods:
+            if existing.base_url is None:
+                continue
+            logger.info(
+                "RunPod checking existing pod pod_id=%s status=%s",
+                existing.runpod_pod_id,
+                existing.status,
+            )
             if self._healthcheck(existing.base_url):
+                logger.info(
+                    "RunPod existing pod healthcheck ok pod_id=%s previous_status=%s",
+                    existing.runpod_pod_id,
+                    existing.status,
+                )
                 self._mark_pod_busy(session, existing, job_id)
+                logger.info("RunPod reusing existing pod pod_id=%s", existing.runpod_pod_id)
                 return ManagedComfyUIEndpoint(
                     base_url=existing.base_url,
                     managed=True,
                     runpod_pod_id=existing.runpod_pod_id,
                     db_pod_id=existing.id,
                 )
-            self._mark_pod_failed(session, existing, "ComfyUI healthcheck failed")
 
         pod = self._create_and_wait_for_pod(session, job_id=job_id)
         return ManagedComfyUIEndpoint(
@@ -165,17 +177,26 @@ class RunPodManager:
                 logger.info("RunPod pod terminated pod_id=%s", refreshed.runpod_pod_id)
         return terminated
 
-    def _get_existing_ready_or_idle_pod(self, session: Session) -> RunpodPod | None:
+    def _get_reusable_existing_pods(self, session: Session) -> list[RunpodPod]:
         statement = (
             select(RunpodPod)
             .where(
-                RunpodPod.status.in_([PodStatus.READY.value, PodStatus.IDLE.value]),
+                RunpodPod.status.in_(
+                    [
+                        PodStatus.STARTING.value,
+                        PodStatus.CREATING.value,
+                        PodStatus.READY.value,
+                        PodStatus.IDLE.value,
+                    ]
+                ),
                 RunpodPod.base_url.is_not(None),
+                RunpodPod.runpod_pod_id.is_not(None),
+                RunpodPod.active_job_id.is_(None),
+                RunpodPod.current_job_id.is_(None),
             )
             .order_by(RunpodPod.updated_at.desc())
-            .limit(1)
         )
-        return session.execute(statement).scalar_one_or_none()
+        return list(session.execute(statement).scalars())
 
     def _create_and_wait_for_pod(self, session: Session, *, job_id: UUID | None) -> RunpodPod:
         last_error: Exception | None = None
