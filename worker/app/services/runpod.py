@@ -195,22 +195,27 @@ def _nested_first_string(data: dict[str, Any], *paths: tuple[str, ...]) -> str |
 
 
 def _is_capacity_error(response: httpx.Response) -> bool:
-    if response.status_code not in {400, 409, 422, 429, 500, 502, 503}:
+    if response.status_code in {401, 403}:
         return False
     body = _safe_response_body(response).lower()
-    return any(
+    if response.status_code == 400 and any(
         marker in body
-        for marker in (
-            "capacity",
-            "unavailable",
-            "insufficient",
-            "no gpu",
-            "not enough",
-            "no instances",
-            "no instances currently available",
-            "instances currently available",
-        )
-    )
+        for marker in ("invalid", "schema", "not a valid", "must be one of", "malformed")
+    ):
+        return False
+
+    return any(marker in body for marker in _CAPACITY_ERROR_MARKERS)
+
+
+_CAPACITY_ERROR_MARKERS = (
+    "there are no instances currently available",
+    "does not have the resources to deploy your pod",
+    "please try a different machine",
+    "no instances",
+    "not available",
+    "insufficient resources",
+    "capacity",
+)
 
 
 def _http_status_summary(response: httpx.Response) -> str:

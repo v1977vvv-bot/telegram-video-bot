@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -550,6 +551,7 @@ async def create_debug_runpod_pod(session: SessionDep) -> DebugRunPodCreatePodRe
     return DebugRunPodCreatePodResponse(
         pod=_runpod_pod_response(pod),
         selected_gpu_type=create_result["selected_gpu_type"],
+        attempt=create_result["attempt"],
         tried_gpu_types=create_result["tried_gpu_types"],
     )
 
@@ -718,44 +720,68 @@ def _create_runpod_pod_with_fallback(settings) -> dict[str, Any]:
     client = RunPodClient(settings)
     try:
         tried_gpu_types: list[DebugRunPodGpuAttemptResponse] = []
-        for gpu_type in settings.runpod_allowed_gpu_type_list:
-            logger.info("RunPod debug create-pod requested gpu_type=%s", gpu_type)
-            try:
-                info = client.create_pod(gpu_type)
-            except RunPodCapacityError as exc:
-                error = _short_error(exc)
-                logger.warning(
-                    "RunPod debug create-pod capacity unavailable gpu_type=%s error=%s",
-                    gpu_type,
-                    error,
-                )
+        max_attempts = max(settings.runpod_create_max_attempts, 1)
+        sleep_seconds = max(settings.runpod_create_retry_sleep_seconds, 0)
+        for attempt in range(1, max_attempts + 1):
+            logger.info(
+                "RunPod create attempt started attempt=%s max_attempts=%s",
+                attempt,
+                max_attempts,
+            )
+            for gpu_type in settings.runpod_allowed_gpu_type_list:
+                logger.info("RunPod debug create-pod requested gpu_type=%s", gpu_type)
+                try:
+                    info = client.create_pod(gpu_type)
+                except RunPodCapacityError as exc:
+                    error = _short_error(exc)
+                    logger.warning(
+                        "RunPod debug create-pod capacity unavailable gpu_type=%s "
+                        "attempt=%s error=%s",
+                        gpu_type,
+                        attempt,
+                        error,
+                    )
+                    tried_gpu_types.append(
+                        DebugRunPodGpuAttemptResponse(
+                            attempt=attempt,
+                            gpu_type=gpu_type,
+                            status="capacity_unavailable",
+                            error=error,
+                        )
+                    )
+                    continue
+
                 tried_gpu_types.append(
                     DebugRunPodGpuAttemptResponse(
+                        attempt=attempt,
                         gpu_type=gpu_type,
-                        status="capacity_unavailable",
-                        error=error,
+                        status="created",
+                        error=None,
                     )
                 )
-                continue
+                return {
+                    "info": info,
+                    "selected_gpu_type": info.gpu_type or gpu_type,
+                    "attempt": attempt,
+                    "tried_gpu_types": tried_gpu_types,
+                }
 
-            tried_gpu_types.append(
-                DebugRunPodGpuAttemptResponse(
-                    gpu_type=gpu_type,
-                    status="created",
-                    error=None,
+            if attempt < max_attempts:
+                logger.warning(
+                    "RunPod capacity unavailable for all GPU types, retrying after sleep "
+                    "sleep_seconds=%s",
+                    sleep_seconds,
                 )
-            )
-            return {
-                "info": info,
-                "selected_gpu_type": info.gpu_type or gpu_type,
-                "tried_gpu_types": tried_gpu_types,
-            }
+                time.sleep(sleep_seconds)
 
         if tried_gpu_types:
+            logger.warning("RunPod create attempts exhausted")
             raise HTTPException(
                 status_code=503,
                 detail={
                     "message": "No RunPod instances available for configured GPU types",
+                    "attempts": max_attempts,
+                    "retry_sleep_seconds": sleep_seconds,
                     "tried_gpu_types": [attempt.model_dump() for attempt in tried_gpu_types],
                 },
             )

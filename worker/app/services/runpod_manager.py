@@ -179,39 +179,61 @@ class RunPodManager:
 
     def _create_and_wait_for_pod(self, session: Session, *, job_id: UUID | None) -> RunpodPod:
         last_error: Exception | None = None
-        for gpu_type in self._settings.runpod_allowed_gpu_type_list:
-            try:
-                info = self._client.create_pod(gpu_type)
-            except RunPodCapacityError as exc:
-                last_error = exc
-                logger.warning("RunPod capacity unavailable gpu_type=%s", gpu_type)
-                continue
+        max_attempts = max(self._settings.runpod_create_max_attempts, 1)
+        sleep_seconds = max(self._settings.runpod_create_retry_sleep_seconds, 0)
+        for attempt in range(1, max_attempts + 1):
+            logger.info(
+                "RunPod create attempt started attempt=%s max_attempts=%s",
+                attempt,
+                max_attempts,
+            )
+            for gpu_type in self._settings.runpod_allowed_gpu_type_list:
+                try:
+                    info = self._client.create_pod(gpu_type)
+                except RunPodCapacityError as exc:
+                    last_error = exc
+                    logger.warning(
+                        "RunPod capacity unavailable gpu_type=%s attempt=%s",
+                        gpu_type,
+                        attempt,
+                    )
+                    continue
 
-            pod = self._create_pod_record(session, info, gpu_type=gpu_type, job_id=job_id)
-            try:
-                self._wait_for_comfyui_ready(info.base_url)
-            except ComfyUINotReadyError as exc:
-                self._mark_pod_failed(session, pod, str(exc))
-                if self._settings.runpod_auto_terminate:
-                    self._terminate_failed_pod(session, pod)
-                raise
+                pod = self._create_pod_record(session, info, gpu_type=gpu_type, job_id=job_id)
+                try:
+                    self._wait_for_comfyui_ready(info.base_url)
+                except ComfyUINotReadyError as exc:
+                    self._mark_pod_failed(session, pod, str(exc))
+                    if self._settings.runpod_auto_terminate:
+                        self._terminate_failed_pod(session, pod)
+                    raise
 
-            with session.begin():
-                refreshed = session.get(RunpodPod, pod.id, with_for_update=True)
-                if refreshed is None:
-                    raise RunPodError(f"RunPod pod record disappeared pod_id={pod.runpod_pod_id}")
-                now = datetime.now(UTC)
-                refreshed.status = PodStatus.BUSY.value
-                refreshed.active_job_id = job_id
-                refreshed.current_job_id = job_id
-                refreshed.last_healthcheck_at = now
-                refreshed.last_busy_at = now
-                refreshed.last_used_at = now
-                refreshed.error_message = None
-                logger.info("ComfyUI ready pod_id=%s", refreshed.runpod_pod_id)
-                return refreshed
+                with session.begin():
+                    refreshed = session.get(RunpodPod, pod.id, with_for_update=True)
+                    if refreshed is None:
+                        raise RunPodError(
+                            f"RunPod pod record disappeared pod_id={pod.runpod_pod_id}"
+                        )
+                    now = datetime.now(UTC)
+                    refreshed.status = PodStatus.BUSY.value
+                    refreshed.active_job_id = job_id
+                    refreshed.current_job_id = job_id
+                    refreshed.last_healthcheck_at = now
+                    refreshed.last_busy_at = now
+                    refreshed.last_used_at = now
+                    refreshed.error_message = None
+                    logger.info("ComfyUI ready pod_id=%s", refreshed.runpod_pod_id)
+                    return refreshed
+
+            if attempt < max_attempts:
+                logger.warning(
+                    "RunPod retrying create after capacity errors sleep_seconds=%s",
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
 
         if last_error is not None:
+            logger.warning("RunPod create attempts exhausted")
             raise NoGpuAvailableError(
                 "GPU temporarily unavailable. Please try again later."
             ) from last_error

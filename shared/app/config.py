@@ -73,6 +73,8 @@ class Settings(BaseSettings):
     runpod_pod_ready_timeout_seconds: int = 900
     runpod_healthcheck_interval_seconds: int = 10
     runpod_auto_terminate: bool = True
+    runpod_create_max_attempts: int = 3
+    runpod_create_retry_sleep_seconds: int = 20
 
     generation_mode: str = "mock"
     comfyui_port: int = 8188

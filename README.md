@@ -198,6 +198,8 @@ RUNPOD_POD_IDLE_SHUTDOWN_MINUTES=10
 RUNPOD_POD_READY_TIMEOUT_SECONDS=900
 RUNPOD_HEALTHCHECK_INTERVAL_SECONDS=10
 RUNPOD_AUTO_TERMINATE=true
+RUNPOD_CREATE_MAX_ATTEMPTS=3
+RUNPOD_CREATE_RETRY_SLEEP_SECONDS=20
 ```
 
 How it works:
@@ -218,6 +220,9 @@ How it works:
   is marked failed and terminated when `RUNPOD_AUTO_TERMINATE=true`.
 - Stage 7 uses one active pod and one local worker process. If GPU capacity is
   unavailable, the job fails with a clear message and frozen balance is refunded.
+- On capacity errors, the manager retries pod creation up to
+  `RUNPOD_CREATE_MAX_ATTEMPTS`, sleeping `RUNPOD_CREATE_RETRY_SLEEP_SECONDS` between
+  full passes over `RUNPOD_ALLOWED_GPU_TYPES`.
 
 Debug commands:
 
@@ -650,7 +655,8 @@ ComfyUI troubleshooting:
   then fails the job with refund if no GPU can be provisioned. A waiting queue is a
   later stage.
 - Debug `POST /api/v1/debug/runpod/create-pod` also tries GPU types in
-  `RUNPOD_ALLOWED_GPU_TYPES` order and returns `tried_gpu_types` for capacity failures.
+  `RUNPOD_ALLOWED_GPU_TYPES` order, applies the same create retry policy, and returns
+  `tried_gpu_types` for capacity failures.
 - Debug RunPod state with `GET /api/v1/debug/runpod/pods`; terminate a stuck pod with
   `DELETE /api/v1/debug/runpod/pods/{runpod_pod_id}`.
 - `No mp4 output found in ComfyUI history`: check that the workflow's
