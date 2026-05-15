@@ -22,23 +22,30 @@ photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomu
 - Local debug Telegram notification endpoint: `POST /api/v1/debug/telegram/test-notification`.
 - Local debug segment status endpoint: `GET /api/v1/debug/generation/jobs/{job_id}/segments`.
 - Local debug audio segment-plan endpoint: `POST /api/v1/debug/audio/segment-plan`.
+- Local debug RunPod pod endpoints: `GET /api/v1/debug/runpod/pods`,
+  `POST /api/v1/debug/runpod/create-pod`, `POST /api/v1/debug/runpod/cleanup-idle`,
+  and `DELETE /api/v1/debug/runpod/pods/{runpod_pod_id}`.
 - Private file download endpoint: `GET /api/v1/files/{file_id}/download?telegram_id=...`.
 - Generation draft flow endpoints under `/api/v1/generation`.
 - Async SQLAlchemy 2.x, PostgreSQL, Redis, and Alembic setup.
 - Initial migration with users, balances, generation jobs, uploads, payments, and RunPod pods.
 - `0002_balance_transactions` migration with balance ledger records.
 - `0003_generation_flow` migration with generation segments and job lifecycle timestamps.
+- `0004_runpod_manager` migration with RunPod pod lifecycle fields.
 - User, balance, statistics, and generation-history repository/service layers.
 - Aiogram 3.x bot with `/start`, statistics, generation history, balance top-up stub, help, support,
   `/debug_add_balance`, and an FSM generation flow.
 - Celery worker with a sync SQLAlchemy/psycopg DB layer, mock generation mode, and
   ComfyUI generation mode with sequential 30-second segments for long audio.
+- RunPod auto-manager for creating a pod from a template, waiting for ComfyUI readiness,
+  reusing one idle pod, and terminating idle pods through debug cleanup.
 - Storage abstraction with local and Cloudflare R2 providers.
 - Local source-file storage under `storage/users/{user_id}` when `STORAGE_PROVIDER=local`.
 - Cloudflare R2 upload and presigned download URLs when `STORAGE_PROVIDER=cloudflare_r2`.
 - InfiniteTalk API workflow patcher for ComfyUI node ids `313`, `125`, `245`, `246`,
   `270`, `194`, and `317`.
-- Interface stubs for RunPod, Cryptomus, pricing, audio, and video stitching.
+- Interface stubs for Cryptomus plus implemented pricing, audio, video stitching, storage,
+  ComfyUI, and RunPod pod lifecycle boundaries.
 - Placeholder workflow at `workflows/infinite_talk_base.json` and API workflow at
   `workflows/infinite_talk_api.json`.
 
@@ -91,8 +98,10 @@ is optional.
 
 `GENERATION_MODE=mock` keeps generation local to the worker stub and does not call ComfyUI.
 
-`GENERATION_MODE=comfyui` sends jobs to an already running ComfyUI instance. RunPod
-pod lifecycle is still manual at this stage.
+`GENERATION_MODE=comfyui` sends jobs to ComfyUI. If `RUNPOD_API_KEY` and
+`RUNPOD_TEMPLATE_ID` are configured, the worker uses the RunPod auto-manager to create
+or reuse a pod and then talks to `https://{pod_id}-{RUNPOD_COMFYUI_PORT}.proxy.runpod.net`.
+If RunPod is not configured, the worker falls back to `COMFYUI_BASE_URL`.
 
 ComfyUI settings:
 
@@ -164,6 +173,137 @@ curl -X POST http://localhost:8000/api/v1/debug/comfyui/validate-workflow
 curl -X POST http://localhost:8000/api/v1/debug/comfyui/patch-workflow-preview \
   -H "Content-Type: application/json" \
   -d '{"image_filename": "test.png", "audio_filename": "test.mp3", "width": 480, "height": 480, "fps": 25, "frame_count": 250}'
+```
+
+## RunPod auto-manager
+
+Stage 7 runs without RunPod Network Volume. The pod template or image must already
+contain ComfyUI, custom nodes, models, and startup logic needed to expose ComfyUI on
+`RUNPOD_COMFYUI_PORT`.
+
+RunPod settings:
+
+```env
+RUNPOD_API_KEY=change_me
+RUNPOD_TEMPLATE_ID=change_me
+RUNPOD_CLOUD_TYPE=COMMUNITY
+RUNPOD_ALLOWED_GPU_TYPES=NVIDIA GeForce RTX 5090,NVIDIA GeForce RTX 4090
+RUNPOD_MIN_VCPU=8
+RUNPOD_MIN_RAM_GB=48
+RUNPOD_CONTAINER_DISK_GB=50
+RUNPOD_VOLUME_DISK_GB=100
+RUNPOD_CUDA_VERSION=12.8
+RUNPOD_COMFYUI_PORT=8188
+RUNPOD_POD_IDLE_SHUTDOWN_MINUTES=10
+RUNPOD_POD_READY_TIMEOUT_SECONDS=900
+RUNPOD_HEALTHCHECK_INTERVAL_SECONDS=10
+RUNPOD_AUTO_TERMINATE=true
+```
+
+How it works:
+
+- Worker first looks for a DB pod record with status `ready` or `idle`.
+- If the pod passes ComfyUI `/system_stats`, it is marked `busy` and reused.
+- If no ready pod exists, the worker creates a pod from `RUNPOD_TEMPLATE_ID`.
+- GPU types are tried in `RUNPOD_ALLOWED_GPU_TYPES` order. If `NVIDIA GeForce RTX 5090`
+  is unavailable, the worker tries `NVIDIA GeForce RTX 4090`.
+- The RunPod create payload includes `cloudType`, `computeType=GPU`, `gpuTypeIds`,
+  `gpuCount=1`, `templateId`, `allowedCudaVersions=[RUNPOD_CUDA_VERSION]`, disk
+  sizes, minimum vCPU/RAM, public HTTP port `{RUNPOD_COMFYUI_PORT}/http`, and
+  `supportPublicIp=true`.
+- The payload intentionally does not include `networkVolumeId`.
+- ComfyUI base URL is resolved as
+  `https://{runpod_pod_id}-{RUNPOD_COMFYUI_PORT}.proxy.runpod.net`.
+- If ComfyUI does not become healthy before `RUNPOD_POD_READY_TIMEOUT_SECONDS`, the pod
+  is marked failed and terminated when `RUNPOD_AUTO_TERMINATE=true`.
+- Stage 7 uses one active pod and one local worker process. If GPU capacity is
+  unavailable, the job fails with a clear message and frozen balance is refunded.
+
+Debug commands:
+
+```bash
+curl http://localhost:8000/api/v1/debug/runpod/pods
+curl -X POST http://localhost:8000/api/v1/debug/runpod/create-pod
+curl -X POST http://localhost:8000/api/v1/debug/runpod/cleanup-idle
+curl -X DELETE http://localhost:8000/api/v1/debug/runpod/pods/{runpod_pod_id}
+```
+
+## Stage 7.1 - RunPod bootstrap script
+
+The Stage 7 auto-manager can create a pod, but the pod still has to prepare ComfyUI
+models before the workflow can run. `scripts/runpod_bootstrap_comfyui.sh` is the
+intermediate no-Network-Volume and no-custom-image bootstrap path.
+
+The script:
+
+- checks that `COMFYUI_DIR/main.py` exists;
+- creates all required model directories;
+- downloads missing model files;
+- deletes and redownloads zero-byte files;
+- verifies that every required model exists and has a non-zero size;
+- starts ComfyUI on `0.0.0.0:8188` by default;
+- is idempotent and skips files that already exist with a non-zero size.
+
+The first pod boot can take a long time because the required models are tens of GB.
+Without Network Volume, the models are lost when the pod is terminated. The production
+solution should be a custom Docker image or reliable persistent storage.
+
+Supported bootstrap env:
+
+```env
+COMFYUI_DIR=/workspace/ComfyUI
+COMFYUI_PORT=8188
+COMFYUI_EXTRA_ARGS=--use-sage-attention
+SKIP_MODEL_DOWNLOADS=false
+BOOTSTRAP_ONLY=false
+KILL_EXISTING_COMFYUI=true
+```
+
+RunPod template startup command, if the script already exists inside the template or
+image:
+
+```bash
+bash /workspace/ComfyUI/scripts/runpod_bootstrap_comfyui.sh
+```
+
+RunPod template startup command, if the script should be fetched from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/scripts/runpod_bootstrap_comfyui.sh -o /tmp/runpod_bootstrap_comfyui.sh && bash /tmp/runpod_bootstrap_comfyui.sh
+```
+
+Replace `OWNER/REPO` after the repository is published.
+
+Manual check inside a RunPod terminal:
+
+```bash
+cd /workspace/ComfyUI
+bash scripts/runpod_bootstrap_comfyui.sh
+```
+
+If you only want to download and verify models without starting ComfyUI:
+
+```bash
+cd /workspace/ComfyUI
+BOOTSTRAP_ONLY=true bash scripts/runpod_bootstrap_comfyui.sh
+```
+
+Check ComfyUI from your Mac:
+
+```bash
+curl https://PODID-8188.proxy.runpod.net/system_stats
+```
+
+Check required model sizes inside the pod:
+
+```bash
+du -h /workspace/ComfyUI/models/diffusion_models/WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf
+du -h /workspace/ComfyUI/models/diffusion_models/WanVideo/InfiniteTalk/Wan2_1-InfiniteTalk_Single_Q8.gguf
+du -h /workspace/ComfyUI/models/vae/wanvideo/Wan2_1_VAE_bf16.safetensors
+du -h /workspace/ComfyUI/models/text_encoders/umt5-xxl-enc-bf16.safetensors
+du -h /workspace/ComfyUI/models/clip_vision/clip_vision_h.safetensors
+du -h /workspace/ComfyUI/models/diffusion_models/MelBandRoformer/MelBandRoformer_fp16.safetensors
+du -h /workspace/ComfyUI/models/loras/WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors
 ```
 
 Return to mock mode:
@@ -501,6 +641,16 @@ The bot uses `safe_html(...)` for generation history and backend error strings.
 
 ComfyUI troubleshooting:
 
+- RunPod pod stays in `starting`: check the pod template startup logs. The template
+  must start ComfyUI and expose port `RUNPOD_COMFYUI_PORT`.
+- RunPod readiness timeout: the worker marks the pod failed and terminates it when
+  `RUNPOD_AUTO_TERMINATE=true`. Increase `RUNPOD_POD_READY_TIMEOUT_SECONDS` only if
+  the template legitimately needs more boot time.
+- GPU unavailable: Stage 7 tries GPU types in `RUNPOD_ALLOWED_GPU_TYPES` order and
+  then fails the job with refund if no GPU can be provisioned. A waiting queue is a
+  later stage.
+- Debug RunPod state with `GET /api/v1/debug/runpod/pods`; terminate a stuck pod with
+  `DELETE /api/v1/debug/runpod/pods/{runpod_pod_id}`.
 - `No mp4 output found in ComfyUI history`: check that the workflow's
   `VHS_VideoCombine` node writes an `.mp4` and that node `317` is present.
 - `LoadAudio did not receive file`: check `COMFYUI_INPUT_SUBFOLDER`, the node `125`
@@ -556,7 +706,7 @@ ComfyUI troubleshooting:
 
 ## Next stages
 
-- RunPod pod lifecycle management.
-- Segment overlap/crossfade and replacing concatenated audio with original full audio.
+- Waiting-for-GPU queue/retry instead of immediate failed+refund when capacity is unavailable.
+- Segment overlap/crossfade and improved continuity.
 - Production cleanup scheduling and storage lifecycle policies.
 - Cryptomus invoice creation and webhook processing.

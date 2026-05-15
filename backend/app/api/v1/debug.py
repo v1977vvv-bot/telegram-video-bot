@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Annotated, Any
@@ -19,6 +19,7 @@ from backend.app.models.balance_account import BalanceAccount
 from backend.app.models.balance_transaction import BalanceTransaction
 from backend.app.models.generation_job import GenerationJob
 from backend.app.models.generation_segment import GenerationSegment
+from backend.app.models.runpod_pod import RunpodPod
 from backend.app.models.uploaded_file import UploadedFile
 from backend.app.repositories.users import UserRepository
 from backend.app.schemas.debug import (
@@ -38,6 +39,11 @@ from backend.app.schemas.debug import (
     DebugLedgerJobResponse,
     DebugLedgerTransactionResponse,
     DebugRepairFrozenBalancesResponse,
+    DebugRunPodCleanupResponse,
+    DebugRunPodCreatePodResponse,
+    DebugRunPodDeleteResponse,
+    DebugRunPodPodResponse,
+    DebugRunPodPodsResponse,
     DebugStorageCleanupResponse,
     DebugStorageDeleteResponse,
     DebugStorageTestUploadRequest,
@@ -58,6 +64,7 @@ from shared.app.database import get_session
 from shared.app.enums import BalanceTransactionType, FileType, JobStatus, SegmentStatus
 from shared.app.exceptions import AppError
 from worker.app.services.audio import AudioService as WorkerAudioService
+from worker.app.services.runpod import RunPodCapacityError, RunPodClient, RunPodError, RunPodPodInfo
 from worker.app.services.workflow_patcher import (
     WorkflowPatchError,
     preview_infinite_talk_patch_values,
@@ -493,6 +500,131 @@ async def send_debug_telegram_notification(
     return DebugTelegramTestNotificationResponse(ok=ok)
 
 
+@router.get("/runpod/pods", response_model=DebugRunPodPodsResponse)
+async def list_debug_runpod_pods(session: SessionDep) -> DebugRunPodPodsResponse:
+    _require_local_env()
+
+    result = await session.execute(select(RunpodPod).order_by(RunpodPod.created_at.desc()))
+    return DebugRunPodPodsResponse(pods=[_runpod_pod_response(pod) for pod in result.scalars()])
+
+
+@router.post("/runpod/create-pod", response_model=DebugRunPodCreatePodResponse)
+async def create_debug_runpod_pod(session: SessionDep) -> DebugRunPodCreatePodResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    if not settings.runpod_auto_manager_enabled:
+        raise AppError(
+            "RunPod manager is not configured", code="runpod_not_configured", status_code=400
+        )
+
+    try:
+        info = await anyio.to_thread.run_sync(lambda: _create_runpod_pod_with_fallback(settings))
+    except RunPodError as exc:
+        raise AppError(str(exc), code="runpod_create_failed", status_code=502) from exc
+
+    async with session.begin():
+        pod = RunpodPod(
+            provider_pod_id=info.pod_id,
+            runpod_pod_id=info.pod_id,
+            name=info.name,
+            status="starting",
+            cloud_type=settings.runpod_cloud_type,
+            gpu_type=info.gpu_type,
+            template_id=settings.runpod_template_id,
+            base_url=info.base_url,
+            comfyui_url=info.base_url,
+            comfyui_port=settings.runpod_comfyui_port,
+        )
+        session.add(pod)
+        await session.flush()
+
+    return DebugRunPodCreatePodResponse(pod=_runpod_pod_response(pod))
+
+
+@router.delete("/runpod/pods/{runpod_pod_id}", response_model=DebugRunPodDeleteResponse)
+async def delete_debug_runpod_pod(
+    runpod_pod_id: str,
+    session: SessionDep,
+) -> DebugRunPodDeleteResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    if not settings.runpod_auto_manager_enabled:
+        raise AppError(
+            "RunPod manager is not configured", code="runpod_not_configured", status_code=400
+        )
+
+    try:
+        await anyio.to_thread.run_sync(lambda: _terminate_runpod_pod(settings, runpod_pod_id))
+    except RunPodError as exc:
+        raise AppError(str(exc), code="runpod_terminate_failed", status_code=502) from exc
+
+    async with session.begin():
+        result = await session.execute(
+            select(RunpodPod).where(RunpodPod.runpod_pod_id == runpod_pod_id)
+        )
+        pod = result.scalar_one_or_none()
+        if pod is not None:
+            now = datetime.now(UTC)
+            pod.status = "terminated"
+            pod.active_job_id = None
+            pod.current_job_id = None
+            pod.terminated_at = now
+            pod.updated_at = now
+
+    return DebugRunPodDeleteResponse(runpod_pod_id=runpod_pod_id, terminated=True)
+
+
+@router.post("/runpod/cleanup-idle", response_model=DebugRunPodCleanupResponse)
+async def cleanup_debug_runpod_idle_pods(
+    session: SessionDep,
+    force: bool = False,
+) -> DebugRunPodCleanupResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    if not settings.runpod_auto_manager_enabled:
+        raise AppError(
+            "RunPod manager is not configured", code="runpod_not_configured", status_code=400
+        )
+
+    cutoff = datetime.now(UTC)
+    if not force:
+        cutoff -= timedelta(minutes=settings.runpod_pod_idle_shutdown_minutes)
+
+    statement = select(RunpodPod).where(
+        RunpodPod.status.in_(["idle", "ready"]),
+        RunpodPod.active_job_id.is_(None),
+    )
+    if not force:
+        statement = statement.where(
+            RunpodPod.last_used_at.is_not(None), RunpodPod.last_used_at < cutoff
+        )
+
+    result = await session.execute(statement)
+    pods = list(result.scalars())
+    await session.commit()
+    terminated: list[str] = []
+    for pod in pods:
+        try:
+            await anyio.to_thread.run_sync(
+                lambda pod_id=pod.runpod_pod_id: _terminate_runpod_pod(settings, pod_id)
+            )
+        except RunPodError:
+            continue
+        async with session.begin():
+            now = datetime.now(UTC)
+            pod.status = "terminated"
+            pod.active_job_id = None
+            pod.current_job_id = None
+            pod.terminated_at = now
+            pod.updated_at = now
+            terminated.append(pod.runpod_pod_id)
+
+    return DebugRunPodCleanupResponse(terminated_count=len(terminated), pod_ids=terminated)
+
+
 @router.get("/comfyui/health", response_model=DebugComfyUIHealthResponse)
 async def get_debug_comfyui_health() -> DebugComfyUIHealthResponse:
     _require_local_env()
@@ -570,6 +702,55 @@ async def preview_debug_comfyui_workflow_patch(
     return DebugComfyUIPatchWorkflowPreviewResponse(nodes=result["nodes"])
 
 
+def _create_runpod_pod_with_fallback(settings) -> RunPodPodInfo:
+    client = RunPodClient(settings)
+    try:
+        last_error: Exception | None = None
+        for gpu_type in settings.runpod_allowed_gpu_type_list:
+            try:
+                return client.create_pod(gpu_type)
+            except RunPodCapacityError as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise RunPodError(
+                "GPU temporarily unavailable. Please try again later."
+            ) from last_error
+        raise RunPodError("No RunPod GPU types configured")
+    finally:
+        client.close()
+
+
+def _terminate_runpod_pod(settings, runpod_pod_id: str) -> None:
+    client = RunPodClient(settings)
+    try:
+        client.terminate_pod(runpod_pod_id)
+    finally:
+        client.close()
+
+
+def _runpod_pod_response(pod: RunpodPod) -> DebugRunPodPodResponse:
+    return DebugRunPodPodResponse(
+        id=pod.id,
+        runpod_pod_id=pod.runpod_pod_id,
+        provider_pod_id=pod.provider_pod_id,
+        name=pod.name,
+        status=pod.status,
+        cloud_type=pod.cloud_type,
+        gpu_type=pod.gpu_type,
+        template_id=pod.template_id,
+        base_url=pod.base_url or pod.comfyui_url,
+        comfyui_port=pod.comfyui_port,
+        active_job_id=pod.active_job_id or pod.current_job_id,
+        error_message=pod.error_message,
+        last_healthcheck_at=pod.last_healthcheck_at or pod.last_heartbeat_at,
+        last_used_at=pod.last_used_at or pod.last_busy_at,
+        created_at=pod.created_at,
+        updated_at=pod.updated_at,
+        terminated_at=pod.terminated_at,
+    )
+
+
 def _require_local_env() -> None:
     settings = get_settings()
     if settings.app_env != "local":
@@ -606,7 +787,7 @@ def _extract_comfyui_health_summary(data: Any) -> dict[str, Any]:
     if not isinstance(device, str):
         device = None
     vram_free = first_device.get("vram_free") or first_device.get("free_memory")
-    if not isinstance(vram_free, (int, float)):
+    if not isinstance(vram_free, (int, float)):  # noqa: UP038
         vram_free = None
 
     return {

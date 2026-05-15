@@ -28,6 +28,7 @@ from worker.app.database import get_worker_session
 from worker.app.services.audio import AudioSegmentFile, AudioSegmentPlan, AudioService
 from worker.app.services.balance import SyncBalanceService
 from worker.app.services.comfyui_client import ComfyUIClient
+from worker.app.services.runpod_manager import ManagedComfyUIEndpoint, RunPodManager
 from worker.app.services.storage import WorkerStorageService
 from worker.app.services.telegram_notify import GenerationNotification, TelegramNotifyService
 from worker.app.services.video_probe import VideoProbeService
@@ -189,8 +190,14 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
     frames_dir = temp_root / "frames"
     final_dir = temp_root / "final"
     success = False
-    client = ComfyUIClient(settings)
+    endpoint: ManagedComfyUIEndpoint | None = None
+    client: ComfyUIClient | None = None
+    runpod_manager = RunPodManager(settings)
     try:
+        with get_worker_session() as session:
+            endpoint = runpod_manager.ensure_comfyui_endpoint(session, job_id=job_id)
+        client = ComfyUIClient(settings, base_url=endpoint.base_url)
+
         with get_worker_session() as session:
             storage = WorkerStorageService(session, settings)
             image_path = storage.download_to_temp(context.source_image_file_id, input_dir)
@@ -278,6 +285,7 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
 
         notification = _complete_comfyui_job(job_id, context, final_path)
         _notify_generation_completed(notification)
+        _mark_runpod_endpoint_idle(runpod_manager, endpoint)
         success = True
         logger.info(
             "process_generation_job comfyui completed job_id=%s segments_count=%s",
@@ -285,10 +293,39 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
             len(context.segments),
         )
         return {"status": "completed", "job_id": str(job_id)}
+    except Exception:
+        if endpoint is not None:
+            _release_runpod_endpoint_after_failure(runpod_manager, endpoint)
+        raise
     finally:
-        client.close()
+        if client is not None:
+            client.close()
         if success or settings.app_env != "local":
             shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def _mark_runpod_endpoint_idle(
+    manager: RunPodManager,
+    endpoint: ManagedComfyUIEndpoint | None,
+) -> None:
+    if endpoint is None:
+        return
+    try:
+        with get_worker_session() as session:
+            manager.mark_pod_idle(session, endpoint)
+    except Exception:
+        logger.warning("RunPod pod idle mark failed pod_id=%s", endpoint.runpod_pod_id)
+
+
+def _release_runpod_endpoint_after_failure(
+    manager: RunPodManager,
+    endpoint: ManagedComfyUIEndpoint,
+) -> None:
+    try:
+        with get_worker_session() as session:
+            manager.release_after_failure(session, endpoint)
+    except Exception:
+        logger.warning("RunPod pod failure release failed pod_id=%s", endpoint.runpod_pod_id)
 
 
 def _start_comfyui_job(job_id: UUID, settings: Settings) -> ComfyUIJobContext:

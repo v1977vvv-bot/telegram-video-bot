@@ -59,9 +59,9 @@ class ComfyUIOutputFile:
 
 
 class ComfyUIClient:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, *, base_url: str | None = None) -> None:
         self._settings = settings or get_settings()
-        self._base_url = self._settings.comfyui_base_url.rstrip("/")
+        self._base_url = (base_url or self._settings.comfyui_base_url).rstrip("/")
         self._client = httpx.Client(
             base_url=self._base_url,
             timeout=httpx.Timeout(120.0, connect=15.0),

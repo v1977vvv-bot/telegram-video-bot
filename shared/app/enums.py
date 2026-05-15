@@ -64,10 +64,13 @@ class BalanceTransactionType(StrEnum):
 
 
 class PodStatus(StrEnum):
+    CREATING = "creating"
     STARTING = "starting"
     READY = "ready"
     BUSY = "busy"
     IDLE = "idle"
+    STOPPING = "stopping"
+    TERMINATED = "terminated"
     DELETING = "deleting"
     DELETED = "deleted"
     FAILED = "failed"

@@ -157,3 +157,41 @@ class DebugAudioSegmentPlanResponse(BaseModel):
     duration_seconds: Decimal
     silences_found: int
     segments: list[DebugAudioSegmentPlanItemResponse]
+
+
+class DebugRunPodPodResponse(BaseModel):
+    id: UUID
+    runpod_pod_id: str
+    provider_pod_id: str
+    name: str | None
+    status: str
+    cloud_type: str | None
+    gpu_type: str | None
+    template_id: str | None
+    base_url: str | None
+    comfyui_port: int | None
+    active_job_id: UUID | None
+    error_message: str | None
+    last_healthcheck_at: datetime | None
+    last_used_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    terminated_at: datetime | None
+
+
+class DebugRunPodPodsResponse(BaseModel):
+    pods: list[DebugRunPodPodResponse]
+
+
+class DebugRunPodCreatePodResponse(BaseModel):
+    pod: DebugRunPodPodResponse
+
+
+class DebugRunPodDeleteResponse(BaseModel):
+    runpod_pod_id: str
+    terminated: bool
+
+
+class DebugRunPodCleanupResponse(BaseModel):
+    terminated_count: int
+    pod_ids: list[str]

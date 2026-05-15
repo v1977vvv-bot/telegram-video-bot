@@ -61,6 +61,18 @@ class Settings(BaseSettings):
     runpod_gpu_type: str = "RTX 4090"
     runpod_idle_timeout_seconds: int = 600
     runpod_max_active_pods: int = 1
+    runpod_cloud_type: str = "COMMUNITY"
+    runpod_allowed_gpu_types: str = "NVIDIA GeForce RTX 5090,NVIDIA GeForce RTX 4090"
+    runpod_min_vcpu: int = 8
+    runpod_min_ram_gb: int = 48
+    runpod_container_disk_gb: int = 50
+    runpod_volume_disk_gb: int = 100
+    runpod_cuda_version: str = "12.8"
+    runpod_comfyui_port: int = 8188
+    runpod_pod_idle_shutdown_minutes: int = 10
+    runpod_pod_ready_timeout_seconds: int = 900
+    runpod_healthcheck_interval_seconds: int = 10
+    runpod_auto_terminate: bool = True
 
     generation_mode: str = "mock"
     comfyui_port: int = 8188
@@ -142,6 +154,18 @@ class Settings(BaseSettings):
             if item:
                 values.add(int(item))
         return values
+
+    @property
+    def runpod_allowed_gpu_type_list(self) -> list[str]:
+        return [item.strip() for item in self.runpod_allowed_gpu_types.split(",") if item.strip()]
+
+    @property
+    def runpod_auto_manager_enabled(self) -> bool:
+        api_key = self.runpod_api_key.strip()
+        template_id = self.runpod_template_id.strip()
+        return bool(
+            api_key and api_key != "change_me" and template_id and template_id != "change_me"
+        )
 
 
 @lru_cache(maxsize=1)
