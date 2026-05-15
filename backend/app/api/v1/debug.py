@@ -13,9 +13,10 @@ from uuid import UUID
 import anyio
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from backend.app.models.balance_account import BalanceAccount
 from backend.app.models.balance_transaction import BalanceTransaction
@@ -36,7 +37,10 @@ from backend.app.schemas.debug import (
     DebugComfyUIValidateWorkflowResponse,
     DebugCreateMockJobsRequest,
     DebugCreateMockJobsResponse,
+    DebugFailRefundGenerationJobResponse,
+    DebugGenerationJobListItemResponse,
     DebugGenerationJobSegmentsResponse,
+    DebugGenerationJobsResponse,
     DebugGenerationSegmentResponse,
     DebugLedgerJobResponse,
     DebugLedgerTransactionResponse,
@@ -78,6 +82,21 @@ router = APIRouter(prefix="/debug", tags=["debug"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 MONEY_QUANT = Decimal("0.0001")
 logger = logging.getLogger(__name__)
+ACTIVE_GENERATION_JOB_STATUSES = {
+    JobStatus.QUEUED.value,
+    JobStatus.POD_STARTING.value,
+    JobStatus.UPLOADING_INPUTS.value,
+    JobStatus.GENERATING.value,
+    JobStatus.STITCHING.value,
+    JobStatus.UPLOADING_RESULT.value,
+    "processing",
+    "running",
+}
+FAIL_REFUND_ALLOWED_JOB_STATUSES = {
+    *ACTIVE_GENERATION_JOB_STATUSES,
+    JobStatus.CANCELLED.value,
+    JobStatus.FAILED.value,
+}
 
 
 @router.post("/enqueue-ping", response_model=DebugTaskResponse)
@@ -572,14 +591,21 @@ async def delete_debug_runpod_pod(
     try:
         await anyio.to_thread.run_sync(lambda: _terminate_runpod_pod(settings, runpod_pod_id))
     except RunPodError as exc:
-        raise AppError(str(exc), code="runpod_terminate_failed", status_code=502) from exc
+        if "HTTP 404" not in str(exc) and "not found" not in str(exc).lower():
+            raise AppError(str(exc), code="runpod_terminate_failed", status_code=502) from exc
+        logger.warning(
+            "RunPod debug delete did not find remote pod, continuing local cleanup pod_id=%s",
+            runpod_pod_id,
+        )
 
+    active_job_id: UUID | None = None
     async with session.begin():
         result = await session.execute(
             select(RunpodPod).where(RunpodPod.runpod_pod_id == runpod_pod_id)
         )
         pod = result.scalar_one_or_none()
         if pod is not None:
+            active_job_id = pod.active_job_id or pod.current_job_id
             now = datetime.now(UTC)
             pod.status = "terminated"
             pod.active_job_id = None
@@ -587,7 +613,72 @@ async def delete_debug_runpod_pod(
             pod.terminated_at = now
             pod.updated_at = now
 
+    if active_job_id is not None:
+        await _fail_generation_job_with_refund(
+            session=session,
+            job_id=active_job_id,
+            error_message="RunPod pod was terminated during generation",
+            notify=True,
+        )
+
     return DebugRunPodDeleteResponse(runpod_pod_id=runpod_pod_id, terminated=True)
+
+
+@router.post(
+    "/generation/jobs/{job_id}/fail-refund",
+    response_model=DebugFailRefundGenerationJobResponse,
+)
+async def fail_refund_debug_generation_job(
+    job_id: UUID,
+    session: SessionDep,
+) -> DebugFailRefundGenerationJobResponse:
+    _require_local_env()
+
+    result = await _fail_generation_job_with_refund(
+        session=session,
+        job_id=job_id,
+        error_message="Generation manually failed by debug endpoint",
+        notify=True,
+    )
+    return DebugFailRefundGenerationJobResponse(**result)
+
+
+@router.get("/generation/jobs", response_model=DebugGenerationJobsResponse)
+async def list_debug_generation_jobs(
+    session: SessionDep,
+    limit: int = 20,
+) -> DebugGenerationJobsResponse:
+    _require_local_env()
+
+    safe_limit = max(1, min(limit, 100))
+    result = await session.execute(
+        select(GenerationJob).order_by(GenerationJob.created_at.desc()).limit(safe_limit)
+    )
+    jobs = list(result.scalars())
+    job_ids = [job.id for job in jobs]
+    ledger_flags = await _get_job_ledger_flags(session, job_ids)
+    runpod_map = await _get_runpod_by_job_id(session, job_ids)
+
+    items: list[DebugGenerationJobListItemResponse] = []
+    for job in jobs:
+        ledger = ledger_flags.get(job.id, {})
+        pod = runpod_map.get(job.id)
+        items.append(
+            DebugGenerationJobListItemResponse(
+                id=job.id,
+                status=job.status,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+                price_usd=job.price_usd,
+                cost_usd=job.cost_usd,
+                refunded=ledger.get("refunded", False),
+                captured=ledger.get("captured", False),
+                runpod_pod_id=pod.runpod_pod_id if pod else None,
+                runpod_base_url=pod.base_url or pod.comfyui_url if pod else None,
+            )
+        )
+
+    return DebugGenerationJobsResponse(items=items)
 
 
 @router.post("/runpod/cleanup-idle", response_model=DebugRunPodCleanupResponse)
@@ -792,6 +883,204 @@ def _create_runpod_pod_with_fallback(settings) -> dict[str, Any]:
 
 def _short_error(exc: Exception) -> str:
     return " ".join(str(exc).split())[:500]
+
+
+async def _fail_generation_job_with_refund(
+    *,
+    session: AsyncSession,
+    job_id: UUID,
+    error_message: str,
+    notify: bool,
+) -> dict[str, Any]:
+    refunded = False
+    notification_sent = False
+    telegram_id: int | None = None
+    notification_message: str | None = None
+
+    async with session.begin():
+        result = await session.execute(
+            select(GenerationJob)
+            .options(selectinload(GenerationJob.user))
+            .where(GenerationJob.id == job_id)
+            .with_for_update()
+        )
+        job = result.scalar_one_or_none()
+        if job is None:
+            raise AppError("Generation job not found", code="job_not_found", status_code=404)
+
+        old_status = job.status
+        if old_status == JobStatus.COMPLETED.value:
+            return {
+                "job_id": job.id,
+                "old_status": old_status,
+                "new_status": old_status,
+                "refunded": False,
+                "notification_sent": False,
+                "error_message": job.error_message,
+            }
+
+        totals = await _get_job_transaction_totals(session, job.id)
+        held = totals.get(BalanceTransactionType.HOLD.value, Decimal("0.0000"))
+        captured = totals.get(BalanceTransactionType.CAPTURE.value, Decimal("0.0000"))
+        returned = _money(
+            totals.get(BalanceTransactionType.REFUND.value, Decimal("0.0000"))
+            + totals.get(BalanceTransactionType.RELEASE.value, Decimal("0.0000"))
+        )
+        if captured > Decimal("0"):
+            return {
+                "job_id": job.id,
+                "old_status": old_status,
+                "new_status": old_status,
+                "refunded": False,
+                "notification_sent": False,
+                "error_message": job.error_message,
+            }
+
+        if old_status not in FAIL_REFUND_ALLOWED_JOB_STATUSES:
+            return {
+                "job_id": job.id,
+                "old_status": old_status,
+                "new_status": old_status,
+                "refunded": False,
+                "notification_sent": False,
+                "error_message": job.error_message,
+            }
+
+        unsettled_hold = _money(held - captured - returned)
+        refund_error: str | None = None
+        if unsettled_hold > Decimal("0"):
+            try:
+                await BalanceService(session).refund_frozen_balance_in_transaction(
+                    user_id=job.user_id,
+                    amount_usd=unsettled_hold,
+                    related_job_id=job.id,
+                    reason=error_message,
+                )
+                refunded = True
+            except AppError as exc:
+                refund_error = exc.message
+                logger.warning(
+                    "Debug fail-refund could not refund generation job job_id=%s error=%s",
+                    job.id,
+                    refund_error,
+                )
+
+        now = datetime.now(UTC)
+        job.status = JobStatus.FAILED.value
+        job.error_message = (
+            f"{error_message}; refund failed: {refund_error}" if refund_error else error_message
+        )
+        job.completed_at = now
+
+        segments_result = await session.execute(
+            select(GenerationSegment).where(GenerationSegment.job_id == job.id)
+        )
+        for segment in segments_result.scalars():
+            if segment.status != SegmentStatus.COMPLETED.value:
+                segment.status = SegmentStatus.FAILED.value
+                segment.error_message = job.error_message
+                segment.completed_at = now
+
+        telegram_id = job.user.telegram_id
+        balance_line = (
+            "Средства возвращены на баланс."
+            if refunded
+            else "Средства не списывались или уже были возвращены."
+        )
+        notification_message = (
+            "❌ Генерация не удалась\n\n"
+            f"ID: {str(job_id)[:8]}\n"
+            f"{balance_line}\n"
+            f"Причина: {job.error_message}"
+        )
+        response = {
+            "job_id": job.id,
+            "old_status": old_status,
+            "new_status": job.status,
+            "refunded": refunded,
+            "notification_sent": False,
+            "error_message": job.error_message,
+        }
+
+    if notify and telegram_id is not None and notification_message is not None:
+        try:
+            notification_sent = await TelegramNotificationService().send_message(
+                telegram_id=telegram_id,
+                message=notification_message,
+            )
+        except Exception:
+            logger.warning("Debug fail-refund notification failed job_id=%s", job_id)
+
+    response["notification_sent"] = notification_sent
+    return response
+
+
+async def _get_job_transaction_totals(
+    session: AsyncSession,
+    job_id: UUID,
+) -> dict[str, Decimal]:
+    result = await session.execute(
+        select(BalanceTransaction).where(BalanceTransaction.generation_job_id == job_id)
+    )
+    totals: dict[str, Decimal] = {}
+    for transaction in result.scalars():
+        totals[transaction.type] = _money(
+            totals.get(transaction.type, Decimal("0.0000")) + abs(transaction.amount_usd)
+        )
+    return totals
+
+
+async def _get_job_ledger_flags(
+    session: AsyncSession,
+    job_ids: list[UUID],
+) -> dict[UUID, dict[str, bool]]:
+    if not job_ids:
+        return {}
+
+    result = await session.execute(
+        select(BalanceTransaction).where(BalanceTransaction.generation_job_id.in_(job_ids))
+    )
+    flags: dict[UUID, dict[str, bool]] = {
+        job_id: {"captured": False, "refunded": False} for job_id in job_ids
+    }
+    for transaction in result.scalars():
+        job_id = transaction.generation_job_id
+        if job_id is None:
+            continue
+        item = flags.setdefault(job_id, {"captured": False, "refunded": False})
+        if transaction.type == BalanceTransactionType.CAPTURE.value:
+            item["captured"] = True
+        elif transaction.type in {
+            BalanceTransactionType.REFUND.value,
+            BalanceTransactionType.RELEASE.value,
+        }:
+            item["refunded"] = True
+    return flags
+
+
+async def _get_runpod_by_job_id(
+    session: AsyncSession,
+    job_ids: list[UUID],
+) -> dict[UUID, RunpodPod]:
+    if not job_ids:
+        return {}
+
+    result = await session.execute(
+        select(RunpodPod)
+        .where(
+            or_(
+                RunpodPod.active_job_id.in_(job_ids),
+                RunpodPod.current_job_id.in_(job_ids),
+            )
+        )
+        .order_by(RunpodPod.updated_at.desc())
+    )
+    pods_by_job_id: dict[UUID, RunpodPod] = {}
+    for pod in result.scalars():
+        for job_id in {pod.active_job_id, pod.current_job_id}:
+            if job_id is not None and job_id not in pods_by_job_id:
+                pods_by_job_id[job_id] = pod
+    return pods_by_job_id
 
 
 def _terminate_runpod_pod(settings, runpod_pod_id: str) -> None:

@@ -205,3 +205,29 @@ class DebugRunPodDeleteResponse(BaseModel):
 class DebugRunPodCleanupResponse(BaseModel):
     terminated_count: int
     pod_ids: list[str]
+
+
+class DebugFailRefundGenerationJobResponse(BaseModel):
+    job_id: UUID
+    old_status: str
+    new_status: str
+    refunded: bool
+    notification_sent: bool
+    error_message: str | None
+
+
+class DebugGenerationJobListItemResponse(BaseModel):
+    id: UUID
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    price_usd: Decimal | None
+    cost_usd: Decimal | None
+    refunded: bool
+    captured: bool
+    runpod_pod_id: str | None
+    runpod_base_url: str | None
+
+
+class DebugGenerationJobsResponse(BaseModel):
+    items: list[DebugGenerationJobListItemResponse]

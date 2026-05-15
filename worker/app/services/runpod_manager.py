@@ -222,7 +222,7 @@ class RunPodManager:
 
                 pod = self._create_pod_record(session, info, gpu_type=gpu_type, job_id=job_id)
                 try:
-                    self._wait_for_comfyui_ready(info.base_url)
+                    self._wait_for_comfyui_ready(info.base_url, info.pod_id)
                 except ComfyUINotReadyError as exc:
                     self._mark_pod_failed(session, pod, str(exc))
                     if self._settings.runpod_auto_terminate:
@@ -332,15 +332,39 @@ class RunPodManager:
             refreshed.updated_at = now
             logger.info("RunPod failed pod terminated pod_id=%s", refreshed.runpod_pod_id)
 
-    def _wait_for_comfyui_ready(self, base_url: str) -> None:
+    def _wait_for_comfyui_ready(self, base_url: str, pod_id: str) -> None:
         deadline = time.monotonic() + self._settings.runpod_pod_ready_timeout_seconds
         interval = max(self._settings.runpod_healthcheck_interval_seconds, 1)
         logger.info("Waiting for ComfyUI readiness base_url=%s", base_url)
         while time.monotonic() < deadline:
             if self._healthcheck(base_url):
                 return
+            if self._pod_disappeared_or_terminated(pod_id):
+                raise ComfyUINotReadyError(
+                    "RunPod pod disappeared or was terminated while waiting for ComfyUI"
+                )
             time.sleep(min(interval, max(deadline - time.monotonic(), 0)))
         raise ComfyUINotReadyError("ComfyUI did not become ready before timeout")
+
+    def _pod_disappeared_or_terminated(self, pod_id: str) -> bool:
+        try:
+            info = self._client.get_pod(pod_id)
+        except RunPodError as exc:
+            if "HTTP 404" in str(exc):
+                logger.warning("RunPod pod disappeared while waiting pod_id=%s", pod_id)
+                return True
+            logger.warning("RunPod pod lookup failed while waiting pod_id=%s error=%s", pod_id, exc)
+            return False
+
+        status = (info.status or "").strip().lower()
+        if status in {"terminated", "deleted", "stopped", "exited"}:
+            logger.warning(
+                "RunPod pod terminated while waiting pod_id=%s status=%s",
+                pod_id,
+                status,
+            )
+            return True
+        return False
 
     def _healthcheck(self, base_url: str) -> bool:
         try:
