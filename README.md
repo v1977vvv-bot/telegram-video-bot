@@ -24,7 +24,8 @@ photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomu
 - Local debug audio segment-plan endpoint: `POST /api/v1/debug/audio/segment-plan`.
 - Local debug RunPod pod endpoints: `GET /api/v1/debug/runpod/pods`,
   `POST /api/v1/debug/runpod/create-pod`, `POST /api/v1/debug/runpod/cleanup-idle`,
-  and `DELETE /api/v1/debug/runpod/pods/{runpod_pod_id}`.
+  `POST /api/v1/debug/runpod/keeper-tick`, and
+  `DELETE /api/v1/debug/runpod/pods/{runpod_pod_id}`.
 - Private file download endpoint: `GET /api/v1/files/{file_id}/download?telegram_id=...`.
 - Generation draft flow endpoints under `/api/v1/generation`.
 - Async SQLAlchemy 2.x, PostgreSQL, Redis, and Alembic setup.
@@ -195,10 +196,14 @@ RUNPOD_CONTAINER_DISK_GB=50
 RUNPOD_VOLUME_DISK_GB=100
 RUNPOD_CUDA_VERSION=12.8
 RUNPOD_COMFYUI_PORT=8188
-RUNPOD_POD_IDLE_SHUTDOWN_MINUTES=10
+RUNPOD_POD_IDLE_SHUTDOWN_MINUTES=20
 RUNPOD_POD_READY_TIMEOUT_SECONDS=900
 RUNPOD_HEALTHCHECK_INTERVAL_SECONDS=10
 RUNPOD_AUTO_TERMINATE=true
+RUNPOD_KEEPER_ENABLED=true
+RUNPOD_KEEPER_INTERVAL_SECONDS=120
+RUNPOD_MAX_ACTIVE_PODS=1
+RUNPOD_WARM_POD_ENABLED=true
 RUNPOD_CREATE_MAX_ATTEMPTS=3
 RUNPOD_CREATE_RETRY_SLEEP_SECONDS=20
 RUNPOD_WAITING_GPU_ENABLED=true
@@ -208,7 +213,8 @@ RUNPOD_WAITING_GPU_MAX_WAIT_MINUTES=30
 
 How it works:
 
-- Worker first looks for a DB pod record with status `ready` or `idle`.
+- Worker first looks for a DB pod record with status `starting`, `creating`, `ready`,
+  or `idle`.
 - If the pod passes ComfyUI `/system_stats`, it is marked `busy` and reused.
 - If no ready pod exists, the worker creates a pod from `RUNPOD_TEMPLATE_ID`.
 - GPU types are tried in `RUNPOD_ALLOWED_GPU_TYPES` order. If `NVIDIA GeForce RTX 5090`
@@ -239,6 +245,14 @@ How it works:
   schedules `retry_waiting_for_gpu_jobs` after `RUNPOD_WAITING_GPU_RETRY_SECONDS`.
   If the job waits longer than `RUNPOD_WAITING_GPU_MAX_WAIT_MINUTES`, the next capacity
   failure marks it failed and refunds the frozen balance.
+- Stage 8.2 adds the RunPod keeper. `runpod_keeper_tick` healthchecks managed pods,
+  marks healthy `starting`/`ready` pods as `idle`, terminates idle pods after
+  `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES`, and can keep one warm pod ready when queued or
+  `waiting_for_gpu` jobs exist. It never terminates `busy` pods or pods with an
+  `active_job_id`, and it never changes balances.
+- Warm pods reduce the first-job latency but cost money while idle. Use
+  `RUNPOD_WARM_POD_ENABLED=false` to disable proactive pod creation, or lower
+  `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES` to reduce idle cost.
 
 Example fallback logs:
 
@@ -255,9 +269,15 @@ Debug commands:
 curl http://localhost:8000/api/v1/debug/runpod/pods
 curl -X POST http://localhost:8000/api/v1/debug/runpod/create-pod
 curl -X POST http://localhost:8000/api/v1/debug/runpod/cleanup-idle
+curl -X POST http://localhost:8000/api/v1/debug/runpod/keeper-tick
 curl -X DELETE http://localhost:8000/api/v1/debug/runpod/pods/{runpod_pod_id}
 curl -X POST http://localhost:8000/api/v1/debug/generation/retry-waiting-gpu
 ```
+
+There is no Celery beat scheduler in the MVP compose setup. In production, schedule the
+Celery task `runpod_keeper_tick` every `RUNPOD_KEEPER_INTERVAL_SECONDS` seconds with
+cron, Cloud Scheduler, or Celery beat. The HTTP endpoint is local/debug-only and is meant
+for manual checks, not as the production scheduler surface.
 
 ## Stage 7.1 - RunPod bootstrap script
 
@@ -699,6 +719,9 @@ ComfyUI troubleshooting:
   failures.
 - Debug RunPod state with `GET /api/v1/debug/runpod/pods`; terminate a stuck pod with
   `DELETE /api/v1/debug/runpod/pods/{runpod_pod_id}`.
+- Run the keeper manually with `POST /api/v1/debug/runpod/keeper-tick`. It can create
+  a warm pod for queued or `waiting_for_gpu` work, and it terminates idle pods older
+  than `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES`.
 - `No mp4 output found in ComfyUI history`: check that the workflow's
   `VHS_VideoCombine` node writes an `.mp4` and that node `317` is present.
 - `LoadAudio did not receive file`: check `COMFYUI_INPUT_SUBFOLDER`, the node `125`

@@ -211,6 +211,14 @@ class DebugRunPodCleanupResponse(BaseModel):
     pod_ids: list[str]
 
 
+class DebugRunPodKeeperTickResponse(BaseModel):
+    enabled: bool
+    active_pods: int
+    terminated_idle_pods: list[str]
+    created_warm_pod: str | None
+    requeued_waiting_jobs: int | None = None
+
+
 class DebugFailRefundGenerationJobResponse(BaseModel):
     job_id: UUID
     old_status: str

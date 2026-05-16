@@ -17,6 +17,7 @@ celery_app = Celery(
     include=[
         "worker.app.tasks.debug",
         "worker.app.tasks.generation",
+        "worker.app.tasks.runpod_keeper",
     ],
 )
 

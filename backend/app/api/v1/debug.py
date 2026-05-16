@@ -50,6 +50,7 @@ from backend.app.schemas.debug import (
     DebugRunPodCreatePodResponse,
     DebugRunPodDeleteResponse,
     DebugRunPodGpuAttemptResponse,
+    DebugRunPodKeeperTickResponse,
     DebugRunPodPodResponse,
     DebugRunPodPodsResponse,
     DebugStorageCleanupResponse,
@@ -66,13 +67,18 @@ from backend.app.services.file_cleanup import FileCleanupService
 from backend.app.services.pricing import PricingService
 from backend.app.services.storage import StorageServiceFactory
 from backend.app.services.telegram_notify import TelegramNotificationService
-from backend.app.workers.celery_client import enqueue_debug_ping, enqueue_generation_job
+from backend.app.workers.celery_client import (
+    enqueue_debug_ping,
+    enqueue_generation_job,
+    enqueue_retry_waiting_for_gpu_jobs,
+)
 from shared.app.config import get_settings
 from shared.app.database import get_session
 from shared.app.enums import BalanceTransactionType, FileType, JobStatus, SegmentStatus
 from shared.app.exceptions import AppError
 from worker.app.services.audio import AudioService as WorkerAudioService
 from worker.app.services.runpod import RunPodCapacityError, RunPodClient, RunPodError
+from worker.app.services.runpod_keeper import RunPodKeeper
 from worker.app.services.workflow_patcher import (
     WorkflowPatchError,
     preview_infinite_talk_patch_values,
@@ -771,6 +777,29 @@ async def cleanup_debug_runpod_idle_pods(
             terminated.append(pod.runpod_pod_id)
 
     return DebugRunPodCleanupResponse(terminated_count=len(terminated), pod_ids=terminated)
+
+
+@router.post("/runpod/keeper-tick", response_model=DebugRunPodKeeperTickResponse)
+async def run_debug_runpod_keeper_tick() -> DebugRunPodKeeperTickResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    result = await anyio.to_thread.run_sync(lambda: RunPodKeeper(settings).tick())
+    requeued_waiting_jobs = result.requeued_waiting_jobs
+    if result.should_enqueue_waiting_retry:
+        try:
+            enqueue_retry_waiting_for_gpu_jobs()
+            requeued_waiting_jobs = 0
+        except Exception:
+            logger.warning("Debug RunPod keeper could not enqueue waiting GPU retry")
+
+    return DebugRunPodKeeperTickResponse(
+        enabled=result.enabled,
+        active_pods=result.active_pods,
+        terminated_idle_pods=result.terminated_idle_pods,
+        created_warm_pod=result.created_warm_pod,
+        requeued_waiting_jobs=requeued_waiting_jobs,
+    )
 
 
 @router.get("/comfyui/health", response_model=DebugComfyUIHealthResponse)

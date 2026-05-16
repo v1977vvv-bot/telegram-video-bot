@@ -70,10 +70,13 @@ class Settings(BaseSettings):
     runpod_volume_disk_gb: int = 100
     runpod_cuda_version: str = "12.8"
     runpod_comfyui_port: int = 8188
-    runpod_pod_idle_shutdown_minutes: int = 10
+    runpod_pod_idle_shutdown_minutes: int = 20
     runpod_pod_ready_timeout_seconds: int = 900
     runpod_healthcheck_interval_seconds: int = 10
     runpod_auto_terminate: bool = True
+    runpod_keeper_enabled: bool = True
+    runpod_keeper_interval_seconds: int = 120
+    runpod_warm_pod_enabled: bool = True
     runpod_create_max_attempts: int = 3
     runpod_create_retry_sleep_seconds: int = 20
     runpod_waiting_gpu_enabled: bool = True
