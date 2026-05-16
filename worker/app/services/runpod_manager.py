@@ -20,6 +20,7 @@ from worker.app.services.runpod import (
     RunPodClient,
     RunPodError,
     RunPodPodInfo,
+    RunPodPoolFullError,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,15 +74,45 @@ class RunPodManager:
                     existing.runpod_pod_id,
                     existing.status,
                 )
-                self._mark_pod_busy(session, existing, job_id)
-                logger.info("RunPod reusing existing pod pod_id=%s", existing.runpod_pod_id)
-                return ManagedComfyUIEndpoint(
-                    base_url=existing.base_url,
-                    managed=True,
-                    runpod_pod_id=existing.runpod_pod_id,
-                    db_pod_id=existing.id,
+                if self._try_mark_pod_busy(session, existing, job_id):
+                    logger.info(
+                        "RunPod assigning existing idle pod pod_id=%s job_id=%s",
+                        existing.runpod_pod_id,
+                        job_id,
+                    )
+                    logger.info("RunPod reusing existing pod pod_id=%s", existing.runpod_pod_id)
+                    return ManagedComfyUIEndpoint(
+                        base_url=existing.base_url,
+                        managed=True,
+                        runpod_pod_id=existing.runpod_pod_id,
+                        db_pod_id=existing.id,
+                    )
+                logger.info(
+                    "RunPod existing pod assignment skipped after lock pod_id=%s",
+                    existing.runpod_pod_id,
                 )
 
+        active_count = self._count_active_pods(session)
+        session.commit()
+        max_active_pods = max(self._settings.runpod_max_active_pods, 1)
+        logger.info(
+            "RunPod active pod count active_count=%s max_active_pods=%s",
+            active_count,
+            max_active_pods,
+        )
+        if active_count >= max_active_pods:
+            logger.info(
+                "RunPod pool full, job waiting active_count=%s max_active_pods=%s",
+                active_count,
+                max_active_pods,
+            )
+            raise RunPodPoolFullError("All GPU pods are busy. Job will wait.")
+
+        logger.info(
+            "RunPod creating additional pod active_count=%s max_active_pods=%s",
+            active_count,
+            max_active_pods,
+        )
         pod = self._create_and_wait_for_pod(session, job_id=job_id)
         return ManagedComfyUIEndpoint(
             base_url=pod.base_url or self._client.build_comfyui_base_url(pod.runpod_pod_id),
@@ -191,6 +222,7 @@ class RunPodManager:
                 ),
                 RunpodPod.base_url.is_not(None),
                 RunpodPod.runpod_pod_id.is_not(None),
+                RunpodPod.terminated_at.is_(None),
                 RunpodPod.active_job_id.is_(None),
                 RunpodPod.current_job_id.is_(None),
             )
@@ -323,11 +355,45 @@ class RunPodManager:
             logger.info("RunPod pod record created pod_id=%s", pod.runpod_pod_id)
             return pod
 
-    def _mark_pod_busy(self, session: Session, pod: RunpodPod, job_id: UUID | None) -> None:
+    def _count_active_pods(self, session: Session) -> int:
+        statement = select(RunpodPod).where(
+            RunpodPod.status.in_(
+                [
+                    PodStatus.CREATING.value,
+                    PodStatus.STARTING.value,
+                    PodStatus.READY.value,
+                    PodStatus.IDLE.value,
+                    PodStatus.BUSY.value,
+                ]
+            ),
+            RunpodPod.runpod_pod_id.is_not(None),
+            RunpodPod.terminated_at.is_(None),
+        )
+        return len(list(session.execute(statement).scalars()))
+
+    def _try_mark_pod_busy(
+        self,
+        session: Session,
+        pod: RunpodPod,
+        job_id: UUID | None,
+    ) -> bool:
         with session.begin():
             refreshed = session.get(RunpodPod, pod.id, with_for_update=True)
             if refreshed is None:
                 raise RunPodError(f"RunPod pod record disappeared pod_id={pod.runpod_pod_id}")
+            if (
+                refreshed.status
+                not in {
+                    PodStatus.CREATING.value,
+                    PodStatus.STARTING.value,
+                    PodStatus.READY.value,
+                    PodStatus.IDLE.value,
+                }
+                or refreshed.terminated_at is not None
+                or refreshed.active_job_id is not None
+                or refreshed.current_job_id is not None
+            ):
+                return False
             now = datetime.now(UTC)
             refreshed.status = PodStatus.BUSY.value
             refreshed.active_job_id = job_id
@@ -339,6 +405,7 @@ class RunPodManager:
             logger.info(
                 "RunPod pod marked busy pod_id=%s job_id=%s", refreshed.runpod_pod_id, job_id
             )
+            return True
 
     def _mark_pod_failed(self, session: Session, pod: RunpodPod, error_message: str) -> None:
         with session.begin():

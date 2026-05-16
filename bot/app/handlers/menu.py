@@ -27,6 +27,7 @@ STATUS_DISPLAY = {
     "draft": "📝 черновик",
     "queued": "⏳ в очереди",
     "waiting_for_gpu": "⏳ ожидает GPU",
+    "waiting_for_pod": "⏳ ожидает свободный GPU",
     "generating": "🎬 генерируется",
     "completed": "✅ готово",
     "failed": "❌ ошибка",
@@ -202,6 +203,8 @@ def _format_generation_item(index: int, item: GenerationHistoryItemDto) -> str:
         result += (
             "\nРезультат: ⏳ Ожидаем доступный GPU. " "Задача в очереди, средства пока не списаны."
         )
+    elif item.status == "waiting_for_pod":
+        result += "\nРезультат: ⏳ Задача ожидает свободный GPU. Средства пока не списаны."
     elif item.status in {"queued", "generating"}:
         result += "\nРезультат: ещё не готов"
     return result

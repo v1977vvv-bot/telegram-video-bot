@@ -70,7 +70,7 @@ from backend.app.services.telegram_notify import TelegramNotificationService
 from backend.app.workers.celery_client import (
     enqueue_debug_ping,
     enqueue_generation_job,
-    enqueue_retry_waiting_for_gpu_jobs,
+    enqueue_retry_waiting_generation_jobs,
 )
 from shared.app.config import get_settings
 from shared.app.database import get_session
@@ -92,6 +92,7 @@ logger = logging.getLogger(__name__)
 ACTIVE_GENERATION_JOB_STATUSES = {
     JobStatus.QUEUED.value,
     JobStatus.WAITING_FOR_GPU.value,
+    JobStatus.WAITING_FOR_POD.value,
     JobStatus.POD_STARTING.value,
     JobStatus.UPLOADING_INPUTS.value,
     JobStatus.GENERATING.value,
@@ -660,34 +661,25 @@ async def retry_debug_waiting_gpu_jobs(
 ) -> DebugRetryWaitingGpuResponse:
     _require_local_env()
 
-    settings = get_settings()
-    now = datetime.now(UTC)
-    safe_limit = max(1, min(limit, 100))
-    async with session.begin():
-        result = await session.execute(
-            select(GenerationJob)
-            .where(
-                GenerationJob.status == JobStatus.WAITING_FOR_GPU.value,
-                or_(GenerationJob.next_retry_at.is_(None), GenerationJob.next_retry_at <= now),
-            )
-            .order_by(
-                GenerationJob.next_retry_at.asc().nullsfirst(), GenerationJob.created_at.asc()
-            )
-            .limit(safe_limit)
-            .with_for_update(skip_locked=True)
-        )
-        jobs = list(result.scalars())
-        job_ids = [job.id for job in jobs]
-        next_retry_at = now + timedelta(seconds=max(settings.runpod_waiting_gpu_retry_seconds, 1))
-        for job in jobs:
-            job.status = JobStatus.QUEUED.value
-            job.queued_at = now
-            job.next_retry_at = next_retry_at
+    return await _retry_debug_waiting_jobs(
+        session=session,
+        statuses=[JobStatus.WAITING_FOR_GPU.value],
+        limit=limit,
+    )
 
-    for job_id in job_ids:
-        enqueue_generation_job(str(job_id))
 
-    return DebugRetryWaitingGpuResponse(enqueued=len(job_ids), job_ids=job_ids)
+@router.post("/generation/retry-waiting", response_model=DebugRetryWaitingGpuResponse)
+async def retry_debug_waiting_generation_jobs(
+    session: SessionDep,
+    limit: int = 20,
+) -> DebugRetryWaitingGpuResponse:
+    _require_local_env()
+
+    return await _retry_debug_waiting_jobs(
+        session=session,
+        statuses=[JobStatus.WAITING_FOR_GPU.value, JobStatus.WAITING_FOR_POD.value],
+        limit=limit,
+    )
 
 
 @router.get("/generation/jobs", response_model=DebugGenerationJobsResponse)
@@ -719,6 +711,7 @@ async def list_debug_generation_jobs(
                 price_usd=job.price_usd,
                 cost_usd=job.cost_usd,
                 waiting_for_gpu_since=job.waiting_for_gpu_since,
+                waiting_for_pod_since=job.waiting_for_pod_since,
                 next_retry_at=job.next_retry_at,
                 refunded=ledger.get("refunded", False),
                 captured=ledger.get("captured", False),
@@ -728,6 +721,48 @@ async def list_debug_generation_jobs(
         )
 
     return DebugGenerationJobsResponse(items=items)
+
+
+async def _retry_debug_waiting_jobs(
+    *,
+    session: AsyncSession,
+    statuses: list[str],
+    limit: int,
+) -> DebugRetryWaitingGpuResponse:
+    settings = get_settings()
+    now = datetime.now(UTC)
+    safe_limit = max(1, min(limit, 100))
+    async with session.begin():
+        result = await session.execute(
+            select(GenerationJob)
+            .where(
+                GenerationJob.status.in_(statuses),
+                or_(GenerationJob.next_retry_at.is_(None), GenerationJob.next_retry_at <= now),
+            )
+            .order_by(
+                GenerationJob.next_retry_at.asc().nullsfirst(), GenerationJob.created_at.asc()
+            )
+            .limit(safe_limit)
+            .with_for_update(skip_locked=True)
+        )
+        jobs = list(result.scalars())
+        job_ids = [job.id for job in jobs]
+        for job in jobs:
+            old_status = job.status
+            job.status = JobStatus.QUEUED.value
+            job.queued_at = now
+            job.next_retry_at = _next_debug_retry_at(old_status, settings, now)
+
+    for job_id in job_ids:
+        enqueue_generation_job(str(job_id))
+
+    return DebugRetryWaitingGpuResponse(enqueued=len(job_ids), job_ids=job_ids)
+
+
+def _next_debug_retry_at(status: str, settings, now: datetime) -> datetime:
+    if status == JobStatus.WAITING_FOR_POD.value:
+        return now + timedelta(seconds=max(settings.runpod_queue_retry_seconds, 1))
+    return now + timedelta(seconds=max(settings.runpod_waiting_gpu_retry_seconds, 1))
 
 
 @router.post("/runpod/cleanup-idle", response_model=DebugRunPodCleanupResponse)
@@ -788,7 +823,7 @@ async def run_debug_runpod_keeper_tick() -> DebugRunPodKeeperTickResponse:
     requeued_waiting_jobs = result.requeued_waiting_jobs
     if result.should_enqueue_waiting_retry:
         try:
-            enqueue_retry_waiting_for_gpu_jobs()
+            enqueue_retry_waiting_generation_jobs()
             requeued_waiting_jobs = 0
         except Exception:
             logger.warning("Debug RunPod keeper could not enqueue waiting GPU retry")
@@ -796,8 +831,13 @@ async def run_debug_runpod_keeper_tick() -> DebugRunPodKeeperTickResponse:
     return DebugRunPodKeeperTickResponse(
         enabled=result.enabled,
         active_pods=result.active_pods,
+        busy_pods=result.busy_pods,
+        idle_pods=result.idle_pods,
+        pending_jobs=result.pending_jobs,
+        desired_active_pods=result.desired_active_pods,
         terminated_idle_pods=result.terminated_idle_pods,
         created_warm_pod=result.created_warm_pod,
+        created_warm_pods=result.created_warm_pods,
         requeued_waiting_jobs=requeued_waiting_jobs,
     )
 

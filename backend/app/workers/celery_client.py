@@ -3,7 +3,11 @@ from __future__ import annotations
 from celery.result import AsyncResult
 
 from worker.app.tasks.debug import debug_ping
-from worker.app.tasks.generation import process_generation_job, retry_waiting_for_gpu_jobs
+from worker.app.tasks.generation import (
+    process_generation_job,
+    retry_waiting_for_gpu_jobs,
+    retry_waiting_generation_jobs,
+)
 from worker.app.tasks.runpod_keeper import runpod_keeper_tick
 
 
@@ -17,6 +21,10 @@ def enqueue_generation_job(job_id: str) -> AsyncResult:
 
 def enqueue_retry_waiting_for_gpu_jobs() -> AsyncResult:
     return retry_waiting_for_gpu_jobs.delay()
+
+
+def enqueue_retry_waiting_generation_jobs() -> AsyncResult:
+    return retry_waiting_generation_jobs.delay()
 
 
 def enqueue_runpod_keeper_tick() -> AsyncResult:

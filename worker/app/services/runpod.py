@@ -26,6 +26,10 @@ class NoGpuAvailableError(RunPodError):
     pass
 
 
+class RunPodPoolFullError(RunPodError):
+    pass
+
+
 class ComfyUINotReadyError(RunPodError):
     pass
 

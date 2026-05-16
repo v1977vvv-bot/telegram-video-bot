@@ -209,6 +209,9 @@ RUNPOD_CREATE_RETRY_SLEEP_SECONDS=20
 RUNPOD_WAITING_GPU_ENABLED=true
 RUNPOD_WAITING_GPU_RETRY_SECONDS=120
 RUNPOD_WAITING_GPU_MAX_WAIT_MINUTES=30
+RUNPOD_QUEUE_WAIT_ENABLED=true
+RUNPOD_QUEUE_RETRY_SECONDS=60
+RUNPOD_QUEUE_MAX_WAIT_MINUTES=60
 ```
 
 How it works:
@@ -247,12 +250,18 @@ How it works:
   failure marks it failed and refunds the frozen balance.
 - Stage 8.2 adds the RunPod keeper. `runpod_keeper_tick` healthchecks managed pods,
   marks healthy `starting`/`ready` pods as `idle`, terminates idle pods after
-  `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES`, and can keep one warm pod ready when queued or
-  `waiting_for_gpu` jobs exist. It never terminates `busy` pods or pods with an
+  `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES`, and can keep warm pods ready when queued,
+  `waiting_for_gpu`, or `waiting_for_pod` jobs exist. It never terminates `busy` pods or pods with an
   `active_job_id`, and it never changes balances.
 - Warm pods reduce the first-job latency but cost money while idle. Use
   `RUNPOD_WARM_POD_ENABLED=false` to disable proactive pod creation, or lower
   `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES` to reduce idle cost.
+- Stage 8.3 allows `RUNPOD_MAX_ACTIVE_PODS > 1`. Each pod runs one job at a time.
+  The worker reuses a healthy idle pod first; if all pods are busy and active pod count
+  is still below `RUNPOD_MAX_ACTIVE_PODS`, it creates another pod. If the pool is full,
+  the job moves to `waiting_for_pod`, keeps the balance frozen, and retries after
+  `RUNPOD_QUEUE_RETRY_SECONDS`. If it waits longer than
+  `RUNPOD_QUEUE_MAX_WAIT_MINUTES`, the job fails and refunds.
 
 Example fallback logs:
 
@@ -272,6 +281,7 @@ curl -X POST http://localhost:8000/api/v1/debug/runpod/cleanup-idle
 curl -X POST http://localhost:8000/api/v1/debug/runpod/keeper-tick
 curl -X DELETE http://localhost:8000/api/v1/debug/runpod/pods/{runpod_pod_id}
 curl -X POST http://localhost:8000/api/v1/debug/generation/retry-waiting-gpu
+curl -X POST http://localhost:8000/api/v1/debug/generation/retry-waiting
 ```
 
 There is no Celery beat scheduler in the MVP compose setup. In production, schedule the
@@ -713,6 +723,9 @@ ComfyUI troubleshooting:
   Manual local retry is available through
   `POST /api/v1/debug/generation/retry-waiting-gpu`; it changes eligible
   `waiting_for_gpu` jobs back to `queued` and enqueues `process_generation_job`.
+- Pool-full jobs use status `waiting_for_pod`. They mean the configured pod pool is
+  busy or at `RUNPOD_MAX_ACTIVE_PODS`, not that RunPod capacity is unavailable.
+  Retry both waiting states with `POST /api/v1/debug/generation/retry-waiting`.
 - Debug `POST /api/v1/debug/runpod/create-pod` also tries GPU types in
   `RUNPOD_ALLOWED_GPU_TYPES` order, applies the same create retry and RAM fallback
   policy, and returns `phase`, `min_ram_gb`, and `tried_gpu_types` for capacity
@@ -720,8 +733,11 @@ ComfyUI troubleshooting:
 - Debug RunPod state with `GET /api/v1/debug/runpod/pods`; terminate a stuck pod with
   `DELETE /api/v1/debug/runpod/pods/{runpod_pod_id}`.
 - Run the keeper manually with `POST /api/v1/debug/runpod/keeper-tick`. It can create
-  a warm pod for queued or `waiting_for_gpu` work, and it terminates idle pods older
-  than `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES`.
+  warm pods for queued, `waiting_for_gpu`, or `waiting_for_pod` work, and it terminates
+  idle pods older than `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES`.
+- The keeper response includes `active_pods`, `busy_pods`, `idle_pods`,
+  `pending_jobs`, `desired_active_pods`, and `created_warm_pods`. MVP desired count is
+  `min(RUNPOD_MAX_ACTIVE_PODS, queued + waiting_for_gpu + waiting_for_pod jobs)`.
 - `No mp4 output found in ComfyUI history`: check that the workflow's
   `VHS_VideoCombine` node writes an `.mp4` and that node `317` is present.
 - `LoadAudio did not receive file`: check `COMFYUI_INPUT_SUBFOLDER`, the node `125`

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -36,8 +36,13 @@ HEALTHCHECK_POD_STATUSES = {
 class RunPodKeeperResult:
     enabled: bool
     active_pods: int
-    terminated_idle_pods: list[str]
-    created_warm_pod: str | None
+    busy_pods: int = 0
+    idle_pods: int = 0
+    pending_jobs: int = 0
+    desired_active_pods: int = 0
+    terminated_idle_pods: list[str] = field(default_factory=list)
+    created_warm_pod: str | None = None
+    created_warm_pods: list[str] = field(default_factory=list)
     requeued_waiting_jobs: int | None = None
     should_enqueue_waiting_retry: bool = False
 
@@ -45,8 +50,13 @@ class RunPodKeeperResult:
         return {
             "enabled": self.enabled,
             "active_pods": self.active_pods,
+            "busy_pods": self.busy_pods,
+            "idle_pods": self.idle_pods,
+            "pending_jobs": self.pending_jobs,
+            "desired_active_pods": self.desired_active_pods,
             "terminated_idle_pods": self.terminated_idle_pods,
             "created_warm_pod": self.created_warm_pod,
+            "created_warm_pods": self.created_warm_pods,
             "requeued_waiting_jobs": self.requeued_waiting_jobs,
         }
 
@@ -77,13 +87,22 @@ class RunPodKeeper:
 
     def tick(self) -> RunPodKeeperResult:
         active_count = self._count_active_pods()
+        busy_count = self._count_busy_pods()
+        idle_count = self._count_idle_pods()
+        pending_jobs_count = self._count_pending_jobs()
+        desired_active_pods = self._desired_active_pods(pending_jobs_count)
         if not self._settings.runpod_keeper_enabled:
             logger.info("RunPod keeper disabled")
             return RunPodKeeperResult(
                 enabled=False,
                 active_pods=active_count,
+                busy_pods=busy_count,
+                idle_pods=idle_count,
+                pending_jobs=pending_jobs_count,
+                desired_active_pods=desired_active_pods,
                 terminated_idle_pods=[],
                 created_warm_pod=None,
+                created_warm_pods=[],
             )
 
         if not self._settings.runpod_auto_manager_enabled:
@@ -91,30 +110,46 @@ class RunPodKeeper:
             return RunPodKeeperResult(
                 enabled=True,
                 active_pods=active_count,
+                busy_pods=busy_count,
+                idle_pods=idle_count,
+                pending_jobs=pending_jobs_count,
+                desired_active_pods=desired_active_pods,
                 terminated_idle_pods=[],
                 created_warm_pod=None,
+                created_warm_pods=[],
             )
 
         self._refresh_healthy_idle_pods()
         terminated = self._terminate_expired_idle_pods()
         active_count = self._count_active_pods()
+        pending_jobs_count = self._count_pending_jobs()
+        desired_active_pods = self._desired_active_pods(pending_jobs_count)
 
-        created_warm_pod: str | None = None
-        if self._should_create_warm_pod(active_count):
+        created_warm_pods: list[str] = []
+        while self._should_create_warm_pod(active_count, desired_active_pods):
             try:
-                created_warm_pod = self._create_warm_pod()
+                created_warm_pods.append(self._create_warm_pod())
             except NoGpuAvailableError as exc:
                 logger.warning("RunPod keeper warm pod capacity unavailable error=%s", exc)
+                break
             except RunPodError as exc:
                 logger.warning("RunPod keeper warm pod creation failed error=%s", exc)
+                break
             active_count = self._count_active_pods()
 
-        should_enqueue_waiting_retry = self._has_waiting_gpu_jobs() and self._has_idle_pod()
+        busy_count = self._count_busy_pods()
+        idle_count = self._count_idle_pods()
+        should_enqueue_waiting_retry = self._has_waiting_jobs() and idle_count > 0
         return RunPodKeeperResult(
             enabled=True,
             active_pods=active_count,
+            busy_pods=busy_count,
+            idle_pods=idle_count,
+            pending_jobs=pending_jobs_count,
+            desired_active_pods=desired_active_pods,
             terminated_idle_pods=terminated,
-            created_warm_pod=created_warm_pod,
+            created_warm_pod=created_warm_pods[0] if created_warm_pods else None,
+            created_warm_pods=created_warm_pods,
             should_enqueue_waiting_retry=should_enqueue_waiting_retry,
         )
 
@@ -182,14 +217,12 @@ class RunPodKeeper:
             logger.info("RunPod keeper terminated idle pod pod_id=%s", pod_id)
         return terminated
 
-    def _should_create_warm_pod(self, active_count: int) -> bool:
+    def _should_create_warm_pod(self, active_count: int, desired_active_pods: int) -> bool:
         if not self._settings.runpod_warm_pod_enabled:
             return False
-        if active_count >= max(self._settings.runpod_max_active_pods, 1):
+        if desired_active_pods <= 0:
             return False
-        if not self._has_queued_or_waiting_jobs():
-            return False
-        return not self._has_active_pod()
+        return active_count < desired_active_pods
 
     def _create_warm_pod(self) -> str:
         logger.info("RunPod keeper creating warm pod")
@@ -218,6 +251,7 @@ class RunPodKeeper:
                     RunpodPod.status.in_(HEALTHCHECK_POD_STATUSES),
                     RunpodPod.base_url.is_not(None),
                     RunpodPod.runpod_pod_id.is_not(None),
+                    RunpodPod.terminated_at.is_(None),
                 )
             )
             pods = [
@@ -245,6 +279,7 @@ class RunPodKeeper:
                     RunpodPod.active_job_id.is_(None),
                     RunpodPod.current_job_id.is_(None),
                     RunpodPod.runpod_pod_id.is_not(None),
+                    RunpodPod.terminated_at.is_(None),
                 )
             )
             pods: list[_PodSnapshot] = []
@@ -314,39 +349,27 @@ class RunPodKeeper:
                 .where(
                     RunpodPod.status.in_(ACTIVE_POD_STATUSES),
                     RunpodPod.runpod_pod_id.is_not(None),
+                    RunpodPod.terminated_at.is_(None),
                 )
             )
             session.commit()
             return int(count or 0)
 
-    def _has_active_pod(self) -> bool:
-        return self._count_active_pods() > 0
-
-    def _has_queued_or_waiting_jobs(self) -> bool:
+    def _count_busy_pods(self) -> int:
         with get_worker_session() as session:
             count = session.scalar(
                 select(func.count())
-                .select_from(GenerationJob)
+                .select_from(RunpodPod)
                 .where(
-                    GenerationJob.status.in_(
-                        [JobStatus.QUEUED.value, JobStatus.WAITING_FOR_GPU.value]
-                    )
+                    RunpodPod.status == PodStatus.BUSY.value,
+                    RunpodPod.runpod_pod_id.is_not(None),
+                    RunpodPod.terminated_at.is_(None),
                 )
             )
             session.commit()
-            return bool(count)
+            return int(count or 0)
 
-    def _has_waiting_gpu_jobs(self) -> bool:
-        with get_worker_session() as session:
-            count = session.scalar(
-                select(func.count())
-                .select_from(GenerationJob)
-                .where(GenerationJob.status == JobStatus.WAITING_FOR_GPU.value)
-            )
-            session.commit()
-            return bool(count)
-
-    def _has_idle_pod(self) -> bool:
+    def _count_idle_pods(self) -> int:
         with get_worker_session() as session:
             count = session.scalar(
                 select(func.count())
@@ -356,6 +379,44 @@ class RunPodKeeper:
                     RunpodPod.active_job_id.is_(None),
                     RunpodPod.current_job_id.is_(None),
                     RunpodPod.runpod_pod_id.is_not(None),
+                    RunpodPod.terminated_at.is_(None),
+                )
+            )
+            session.commit()
+            return int(count or 0)
+
+    def _count_pending_jobs(self) -> int:
+        with get_worker_session() as session:
+            count = session.scalar(
+                select(func.count())
+                .select_from(GenerationJob)
+                .where(
+                    GenerationJob.status.in_(
+                        [
+                            JobStatus.QUEUED.value,
+                            JobStatus.WAITING_FOR_GPU.value,
+                            JobStatus.WAITING_FOR_POD.value,
+                        ]
+                    )
+                )
+            )
+            session.commit()
+            return int(count or 0)
+
+    def _desired_active_pods(self, pending_jobs_count: int) -> int:
+        if pending_jobs_count <= 0:
+            return 0
+        return min(max(self._settings.runpod_max_active_pods, 1), pending_jobs_count)
+
+    def _has_waiting_jobs(self) -> bool:
+        with get_worker_session() as session:
+            count = session.scalar(
+                select(func.count())
+                .select_from(GenerationJob)
+                .where(
+                    GenerationJob.status.in_(
+                        [JobStatus.WAITING_FOR_GPU.value, JobStatus.WAITING_FOR_POD.value]
+                    )
                 )
             )
             session.commit()

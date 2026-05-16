@@ -28,7 +28,7 @@ from worker.app.database import get_worker_session
 from worker.app.services.audio import AudioSegmentFile, AudioSegmentPlan, AudioService
 from worker.app.services.balance import SyncBalanceService
 from worker.app.services.comfyui_client import ComfyUIClient
-from worker.app.services.runpod import NoGpuAvailableError
+from worker.app.services.runpod import NoGpuAvailableError, RunPodPoolFullError
 from worker.app.services.runpod_manager import ManagedComfyUIEndpoint, RunPodManager
 from worker.app.services.storage import WorkerStorageService
 from worker.app.services.telegram_notify import GenerationNotification, TelegramNotifyService
@@ -73,7 +73,7 @@ class ComfyUISegmentContext:
 
 
 @dataclass(frozen=True, slots=True)
-class WaitingGpuResult:
+class WaitingRunPodResult:
     status: str
     notification: GenerationNotification | None = None
 
@@ -88,6 +88,12 @@ def process_generation_job(job_id: str) -> dict[str, str]:
 def retry_waiting_for_gpu_jobs(limit: int = 50) -> dict[str, object]:
     logger.info("retry_waiting_for_gpu_jobs started limit=%s", limit)
     return _retry_waiting_for_gpu_jobs(limit)
+
+
+@celery_app.task(name="retry_waiting_generation_jobs")
+def retry_waiting_generation_jobs(limit: int = 50) -> dict[str, object]:
+    logger.info("retry_waiting_generation_jobs started limit=%s", limit)
+    return _retry_waiting_generation_jobs(limit)
 
 
 def _process_generation_job(job_id: UUID) -> dict[str, str]:
@@ -217,12 +223,27 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
             wait_result = _handle_no_gpu_available(job_id, settings, _safe_error_message(exc))
             if wait_result.status == JobStatus.WAITING_FOR_GPU.value:
                 _notify_generation_waiting_for_gpu(wait_result.notification)
-                _schedule_waiting_gpu_retry(settings)
+                _schedule_waiting_retry(settings.runpod_waiting_gpu_retry_seconds)
                 return {"status": JobStatus.WAITING_FOR_GPU.value, "job_id": str(job_id)}
 
             notification = _mark_job_failed(
                 job_id,
                 "GPU unavailable for too long. Funds returned.",
+            )
+            _notify_generation_failed(notification)
+            return {"status": JobStatus.FAILED.value, "job_id": str(job_id)}
+        except RunPodPoolFullError as exc:
+            if not settings.runpod_queue_wait_enabled:
+                raise
+            wait_result = _handle_runpod_pool_full(job_id, settings, _safe_error_message(exc))
+            if wait_result.status == JobStatus.WAITING_FOR_POD.value:
+                _notify_generation_waiting_for_pod(wait_result.notification)
+                _schedule_waiting_retry(settings.runpod_queue_retry_seconds)
+                return {"status": JobStatus.WAITING_FOR_POD.value, "job_id": str(job_id)}
+
+            notification = _mark_job_failed(
+                job_id,
+                "Queue wait exceeded. Funds returned.",
             )
             _notify_generation_failed(notification)
             return {"status": JobStatus.FAILED.value, "job_id": str(job_id)}
@@ -363,7 +384,7 @@ def _handle_no_gpu_available(
     job_id: UUID,
     settings: Settings,
     error_message: str,
-) -> WaitingGpuResult:
+) -> WaitingRunPodResult:
     now = datetime.now(UTC)
     retry_seconds = max(settings.runpod_waiting_gpu_retry_seconds, 1)
     max_wait = timedelta(minutes=max(settings.runpod_waiting_gpu_max_wait_minutes, 0))
@@ -389,7 +410,7 @@ def _handle_no_gpu_available(
                     waiting_since,
                     settings.runpod_waiting_gpu_max_wait_minutes,
                 )
-                return WaitingGpuResult(status="expired")
+                return WaitingRunPodResult(status="expired")
 
             next_retry_at = now + timedelta(seconds=retry_seconds)
             job.status = JobStatus.WAITING_FOR_GPU.value
@@ -404,7 +425,7 @@ def _handle_no_gpu_available(
                 job_id,
                 next_retry_at,
             )
-            return WaitingGpuResult(
+            return WaitingRunPodResult(
                 status=JobStatus.WAITING_FOR_GPU.value,
                 notification=GenerationNotification(
                     telegram_id=job.user.telegram_id,
@@ -417,26 +438,95 @@ def _handle_no_gpu_available(
             )
 
 
-def _schedule_waiting_gpu_retry(settings: Settings) -> None:
-    countdown = max(settings.runpod_waiting_gpu_retry_seconds, 1)
+def _handle_runpod_pool_full(
+    job_id: UUID,
+    settings: Settings,
+    error_message: str,
+) -> WaitingRunPodResult:
+    now = datetime.now(UTC)
+    retry_seconds = max(settings.runpod_queue_retry_seconds, 1)
+    max_wait = timedelta(minutes=max(settings.runpod_queue_max_wait_minutes, 0))
+
+    with get_worker_session() as session:
+        with session.begin():
+            job = _get_job(session, job_id, with_segments=False, for_update=True)
+            if job is None:
+                raise JobNotFoundError(f"Generation job not found job_id={job_id}")
+            if job.status in {
+                JobStatus.COMPLETED.value,
+                JobStatus.CANCELLED.value,
+                JobStatus.FAILED.value,
+            }:
+                raise JobSkippedError(job.status)
+
+            waiting_since = job.waiting_for_pod_since or now
+            if max_wait <= timedelta(0) or now - waiting_since >= max_wait:
+                logger.warning(
+                    "RunPod pool wait exceeded max wait job_id=%s waiting_since=%s "
+                    "max_wait_minutes=%s",
+                    job_id,
+                    waiting_since,
+                    settings.runpod_queue_max_wait_minutes,
+                )
+                return WaitingRunPodResult(status="expired")
+
+            next_retry_at = now + timedelta(seconds=retry_seconds)
+            job.status = JobStatus.WAITING_FOR_POD.value
+            job.waiting_for_pod_since = waiting_since
+            job.next_retry_at = next_retry_at
+            job.error_message = (
+                "All GPU pods are busy. Waiting for automatic retry. "
+                f"Last pool error: {error_message}"
+            )
+            logger.info(
+                "Generation job moved to waiting_for_pod job_id=%s next_retry_at=%s",
+                job_id,
+                next_retry_at,
+            )
+            return WaitingRunPodResult(
+                status=JobStatus.WAITING_FOR_POD.value,
+                notification=GenerationNotification(
+                    telegram_id=job.user.telegram_id,
+                    job_id=job.id,
+                    audio_duration_seconds=job.audio_duration_seconds,
+                    price_usd=job.price_usd,
+                    segments_count=job.segments_count,
+                    funds_returned=False,
+                ),
+            )
+
+
+def _schedule_waiting_retry(retry_seconds: int) -> None:
+    countdown = max(retry_seconds, 1)
     try:
-        retry_waiting_for_gpu_jobs.apply_async(countdown=countdown)
+        retry_waiting_generation_jobs.apply_async(countdown=countdown)
     except Exception:
-        logger.warning("Waiting GPU retry scheduling failed")
+        logger.warning("Waiting generation retry scheduling failed")
 
 
 def _retry_waiting_for_gpu_jobs(limit: int = 50) -> dict[str, object]:
+    return _retry_waiting_generation_jobs(limit, statuses=[JobStatus.WAITING_FOR_GPU.value])
+
+
+def _retry_waiting_generation_jobs(
+    limit: int = 50,
+    *,
+    statuses: list[str] | None = None,
+) -> dict[str, object]:
     now = datetime.now(UTC)
     safe_limit = max(1, min(limit, 100))
     job_ids: list[UUID] = []
     settings = get_settings()
-    next_retry_at = now + timedelta(seconds=max(settings.runpod_waiting_gpu_retry_seconds, 1))
+    waiting_statuses = statuses or [
+        JobStatus.WAITING_FOR_GPU.value,
+        JobStatus.WAITING_FOR_POD.value,
+    ]
     with get_worker_session() as session:
         with session.begin():
             result = session.execute(
                 select(GenerationJob)
                 .where(
-                    GenerationJob.status == JobStatus.WAITING_FOR_GPU.value,
+                    GenerationJob.status.in_(waiting_statuses),
                     (
                         (GenerationJob.next_retry_at.is_(None))
                         | (GenerationJob.next_retry_at <= now)
@@ -451,20 +541,27 @@ def _retry_waiting_for_gpu_jobs(limit: int = 50) -> dict[str, object]:
             )
             jobs = list(result.scalars())
             for job in jobs:
+                old_status = job.status
                 job.status = JobStatus.QUEUED.value
                 job.queued_at = now
-                job.next_retry_at = next_retry_at
+                job.next_retry_at = _next_retry_at_for_waiting_status(old_status, settings, now)
                 job_ids.append(job.id)
 
     for job_id in job_ids:
         process_generation_job.delay(str(job_id))
 
-    logger.info("retry_waiting_for_gpu_jobs enqueued jobs count=%s", len(job_ids))
+    logger.info("retry_waiting_generation_jobs enqueued jobs count=%s", len(job_ids))
     return {
         "status": "ok",
         "enqueued": len(job_ids),
         "job_ids": [str(job_id) for job_id in job_ids],
     }
+
+
+def _next_retry_at_for_waiting_status(status: str, settings: Settings, now: datetime) -> datetime:
+    if status == JobStatus.WAITING_FOR_POD.value:
+        return now + timedelta(seconds=max(settings.runpod_queue_retry_seconds, 1))
+    return now + timedelta(seconds=max(settings.runpod_waiting_gpu_retry_seconds, 1))
 
 
 def _start_comfyui_job(job_id: UUID, settings: Settings) -> ComfyUIJobContext:
@@ -978,6 +1075,7 @@ def _mark_job_failed(job_id: UUID, error_message: str) -> GenerationNotification
             if job.price_usd is not None and job.status in {
                 JobStatus.QUEUED.value,
                 JobStatus.WAITING_FOR_GPU.value,
+                JobStatus.WAITING_FOR_POD.value,
                 JobStatus.GENERATING.value,
             }:
                 try:
@@ -1051,6 +1149,17 @@ def _notify_generation_waiting_for_gpu(notification: GenerationNotification | No
     except Exception:
         logger.warning(
             "Generation waiting-for-GPU notification failed job_id=%s", notification.job_id
+        )
+
+
+def _notify_generation_waiting_for_pod(notification: GenerationNotification | None) -> None:
+    if notification is None:
+        return
+    try:
+        TelegramNotifyService().send_generation_waiting_for_pod(notification)
+    except Exception:
+        logger.warning(
+            "Generation waiting-for-pod notification failed job_id=%s", notification.job_id
         )
 
 

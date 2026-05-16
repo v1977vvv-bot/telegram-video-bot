@@ -8,6 +8,7 @@ class JobStatus(StrEnum):
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     QUEUED = "queued"
     WAITING_FOR_GPU = "waiting_for_gpu"
+    WAITING_FOR_POD = "waiting_for_pod"
     POD_STARTING = "pod_starting"
     UPLOADING_INPUTS = "uploading_inputs"
     GENERATING = "generating"

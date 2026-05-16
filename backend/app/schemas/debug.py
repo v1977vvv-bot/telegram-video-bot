@@ -214,8 +214,13 @@ class DebugRunPodCleanupResponse(BaseModel):
 class DebugRunPodKeeperTickResponse(BaseModel):
     enabled: bool
     active_pods: int
+    busy_pods: int | None = None
+    idle_pods: int | None = None
+    pending_jobs: int | None = None
+    desired_active_pods: int | None = None
     terminated_idle_pods: list[str]
     created_warm_pod: str | None
+    created_warm_pods: list[str] = Field(default_factory=list)
     requeued_waiting_jobs: int | None = None
 
 
@@ -236,6 +241,7 @@ class DebugGenerationJobListItemResponse(BaseModel):
     price_usd: Decimal | None
     cost_usd: Decimal | None
     waiting_for_gpu_since: datetime | None
+    waiting_for_pod_since: datetime | None
     next_retry_at: datetime | None
     refunded: bool
     captured: bool
