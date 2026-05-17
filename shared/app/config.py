@@ -77,6 +77,18 @@ class Settings(BaseSettings):
     runpod_keeper_enabled: bool = True
     runpod_keeper_interval_seconds: int = 120
     runpod_warm_pod_enabled: bool = True
+    runpod_autoscaling_enabled: bool = True
+    runpod_autoscaling_strategy: str = "queue_time"
+    runpod_target_queue_wait_minutes: int = 30
+    runpod_min_warm_pods: int = 0
+    runpod_scale_up_cooldown_seconds: int = 120
+    runpod_scale_down_cooldown_seconds: int = 300
+    runpod_max_warm_pods_to_create_per_tick: int = 1
+    runpod_estimated_generation_speed_factor: Decimal = Field(default=Decimal("20"))
+    runpod_max_estimated_gpu_minutes_per_tick: Decimal = Field(default=Decimal("240"))
+    runpod_max_estimated_hourly_gpu_cost_usd: Decimal = Field(default=Decimal("3.00"))
+    runpod_estimated_pod_hourly_cost_usd: Decimal = Field(default=Decimal("0.80"))
+    runpod_default_job_duration_seconds: int = 60
     runpod_create_max_attempts: int = 3
     runpod_create_retry_sleep_seconds: int = 20
     runpod_waiting_gpu_enabled: bool = True

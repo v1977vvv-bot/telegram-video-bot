@@ -13,6 +13,10 @@ from shared.app.config import Settings, get_settings
 from shared.app.enums import JobStatus, PodStatus
 from worker.app.database import get_worker_session
 from worker.app.services.runpod import NoGpuAvailableError, RunPodError
+from worker.app.services.runpod_autoscaler import (
+    RunPodAutoscaler,
+    RunPodAutoscalingDecision,
+)
 from worker.app.services.runpod_manager import RunPodManager
 
 logger = logging.getLogger(__name__)
@@ -45,6 +49,7 @@ class RunPodKeeperResult:
     created_warm_pods: list[str] = field(default_factory=list)
     requeued_waiting_jobs: int | None = None
     should_enqueue_waiting_retry: bool = False
+    autoscaling: RunPodAutoscalingDecision | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -58,6 +63,7 @@ class RunPodKeeperResult:
             "created_warm_pod": self.created_warm_pod,
             "created_warm_pods": self.created_warm_pods,
             "requeued_waiting_jobs": self.requeued_waiting_jobs,
+            "autoscaling": self.autoscaling.as_dict() if self.autoscaling else None,
         }
 
 
@@ -84,49 +90,48 @@ class RunPodKeeper:
     ) -> None:
         self._settings = settings or get_settings()
         self._manager = runpod_manager or RunPodManager(self._settings)
+        self._autoscaler = RunPodAutoscaler(self._settings)
 
     def tick(self) -> RunPodKeeperResult:
-        active_count = self._count_active_pods()
-        busy_count = self._count_busy_pods()
-        idle_count = self._count_idle_pods()
-        pending_jobs_count = self._count_pending_jobs()
-        desired_active_pods = self._desired_active_pods(pending_jobs_count)
+        decision = self._autoscaler.calculate_decision()
         if not self._settings.runpod_keeper_enabled:
             logger.info("RunPod keeper disabled")
             return RunPodKeeperResult(
                 enabled=False,
-                active_pods=active_count,
-                busy_pods=busy_count,
-                idle_pods=idle_count,
-                pending_jobs=pending_jobs_count,
-                desired_active_pods=desired_active_pods,
+                active_pods=decision.active_pods,
+                busy_pods=decision.busy_pods,
+                idle_pods=decision.idle_pods,
+                pending_jobs=decision.pending_jobs,
+                desired_active_pods=decision.desired_active_pods,
                 terminated_idle_pods=[],
                 created_warm_pod=None,
                 created_warm_pods=[],
+                autoscaling=decision,
             )
 
         if not self._settings.runpod_auto_manager_enabled:
             logger.info("RunPod keeper skipped because RunPod auto-manager is not configured")
             return RunPodKeeperResult(
                 enabled=True,
-                active_pods=active_count,
-                busy_pods=busy_count,
-                idle_pods=idle_count,
-                pending_jobs=pending_jobs_count,
-                desired_active_pods=desired_active_pods,
+                active_pods=decision.active_pods,
+                busy_pods=decision.busy_pods,
+                idle_pods=decision.idle_pods,
+                pending_jobs=decision.pending_jobs,
+                desired_active_pods=decision.desired_active_pods,
                 terminated_idle_pods=[],
                 created_warm_pod=None,
                 created_warm_pods=[],
+                autoscaling=decision,
             )
 
         self._refresh_healthy_idle_pods()
-        terminated = self._terminate_expired_idle_pods()
-        active_count = self._count_active_pods()
-        pending_jobs_count = self._count_pending_jobs()
-        desired_active_pods = self._desired_active_pods(pending_jobs_count)
+        decision = self._autoscaler.calculate_decision()
+        terminated = self._terminate_expired_idle_pods(limit=decision.pods_to_terminate)
+        decision = self._autoscaler.calculate_decision()
 
         created_warm_pods: list[str] = []
-        while self._should_create_warm_pod(active_count, desired_active_pods):
+        create_limit = decision.pods_to_create if self._settings.runpod_warm_pod_enabled else 0
+        while len(created_warm_pods) < create_limit:
             try:
                 created_warm_pods.append(self._create_warm_pod())
             except NoGpuAvailableError as exc:
@@ -135,22 +140,21 @@ class RunPodKeeper:
             except RunPodError as exc:
                 logger.warning("RunPod keeper warm pod creation failed error=%s", exc)
                 break
-            active_count = self._count_active_pods()
 
-        busy_count = self._count_busy_pods()
-        idle_count = self._count_idle_pods()
-        should_enqueue_waiting_retry = self._has_waiting_jobs() and idle_count > 0
+        decision = self._autoscaler.calculate_decision()
+        should_enqueue_waiting_retry = self._has_waiting_jobs() and decision.idle_pods > 0
         return RunPodKeeperResult(
             enabled=True,
-            active_pods=active_count,
-            busy_pods=busy_count,
-            idle_pods=idle_count,
-            pending_jobs=pending_jobs_count,
-            desired_active_pods=desired_active_pods,
+            active_pods=decision.active_pods,
+            busy_pods=decision.busy_pods,
+            idle_pods=decision.idle_pods,
+            pending_jobs=decision.pending_jobs,
+            desired_active_pods=decision.desired_active_pods,
             terminated_idle_pods=terminated,
             created_warm_pod=created_warm_pods[0] if created_warm_pods else None,
             created_warm_pods=created_warm_pods,
             should_enqueue_waiting_retry=should_enqueue_waiting_retry,
+            autoscaling=decision,
         )
 
     def _refresh_healthy_idle_pods(self) -> None:
@@ -191,12 +195,14 @@ class RunPodKeeper:
                         previous_status,
                     )
 
-    def _terminate_expired_idle_pods(self) -> list[str]:
-        cutoff = datetime.now(UTC) - timedelta(
-            minutes=self._settings.runpod_pod_idle_shutdown_minutes
-        )
+    def _terminate_expired_idle_pods(self, *, limit: int | None = None) -> list[str]:
+        if limit == 0:
+            return []
+        cutoff = self._idle_termination_cutoff()
         terminated: list[str] = []
         for pod in self._idle_shutdown_candidates(cutoff):
+            if limit is not None and len(terminated) >= limit:
+                break
             pod_id = self._mark_pod_stopping_if_idle(pod.id)
             if pod_id is None:
                 continue
@@ -216,13 +222,6 @@ class RunPodKeeper:
             terminated.append(pod_id)
             logger.info("RunPod keeper terminated idle pod pod_id=%s", pod_id)
         return terminated
-
-    def _should_create_warm_pod(self, active_count: int, desired_active_pods: int) -> bool:
-        if not self._settings.runpod_warm_pod_enabled:
-            return False
-        if desired_active_pods <= 0:
-            return False
-        return active_count < desired_active_pods
 
     def _create_warm_pod(self) -> str:
         logger.info("RunPod keeper creating warm pod")
@@ -270,6 +269,15 @@ class RunPodKeeper:
             ]
             session.commit()
             return pods
+
+    def _idle_termination_cutoff(self) -> datetime:
+        idle_seconds = max(self._settings.runpod_pod_idle_shutdown_minutes, 0) * 60
+        cooldown_seconds = (
+            max(self._settings.runpod_scale_down_cooldown_seconds, 0)
+            if self._settings.runpod_autoscaling_enabled
+            else 0
+        )
+        return datetime.now(UTC) - timedelta(seconds=max(idle_seconds, cooldown_seconds))
 
     def _idle_shutdown_candidates(self, cutoff: datetime) -> list[_PodSnapshot]:
         with get_worker_session() as session:

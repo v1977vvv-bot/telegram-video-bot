@@ -46,6 +46,7 @@ from backend.app.schemas.debug import (
     DebugLedgerTransactionResponse,
     DebugRepairFrozenBalancesResponse,
     DebugRetryWaitingGpuResponse,
+    DebugRunPodAutoscalingPlanResponse,
     DebugRunPodCleanupResponse,
     DebugRunPodCreatePodResponse,
     DebugRunPodDeleteResponse,
@@ -78,6 +79,7 @@ from shared.app.enums import BalanceTransactionType, FileType, JobStatus, Segmen
 from shared.app.exceptions import AppError
 from worker.app.services.audio import AudioService as WorkerAudioService
 from worker.app.services.runpod import RunPodCapacityError, RunPodClient, RunPodError
+from worker.app.services.runpod_autoscaler import RunPodAutoscaler
 from worker.app.services.runpod_keeper import RunPodKeeper
 from worker.app.services.workflow_patcher import (
     WorkflowPatchError,
@@ -831,6 +833,11 @@ async def run_debug_runpod_keeper_tick() -> DebugRunPodKeeperTickResponse:
 
     return DebugRunPodKeeperTickResponse(
         enabled=result.enabled,
+        autoscaling=(
+            DebugRunPodAutoscalingPlanResponse(**result.autoscaling.as_dict())
+            if result.autoscaling
+            else None
+        ),
         active_pods=result.active_pods,
         busy_pods=result.busy_pods,
         idle_pods=result.idle_pods,
@@ -841,6 +848,17 @@ async def run_debug_runpod_keeper_tick() -> DebugRunPodKeeperTickResponse:
         created_warm_pods=result.created_warm_pods,
         requeued_waiting_jobs=requeued_waiting_jobs,
     )
+
+
+@router.get("/runpod/autoscaling-plan", response_model=DebugRunPodAutoscalingPlanResponse)
+async def get_debug_runpod_autoscaling_plan() -> DebugRunPodAutoscalingPlanResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    decision = await anyio.to_thread.run_sync(
+        lambda: RunPodAutoscaler(settings).calculate_decision()
+    )
+    return DebugRunPodAutoscalingPlanResponse(**decision.as_dict())
 
 
 @router.get("/comfyui/health", response_model=DebugComfyUIHealthResponse)

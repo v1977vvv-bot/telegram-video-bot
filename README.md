@@ -204,6 +204,18 @@ RUNPOD_KEEPER_ENABLED=true
 RUNPOD_KEEPER_INTERVAL_SECONDS=120
 RUNPOD_MAX_ACTIVE_PODS=1
 RUNPOD_WARM_POD_ENABLED=true
+RUNPOD_AUTOSCALING_ENABLED=true
+RUNPOD_AUTOSCALING_STRATEGY=queue_time
+RUNPOD_TARGET_QUEUE_WAIT_MINUTES=30
+RUNPOD_MIN_WARM_PODS=0
+RUNPOD_SCALE_UP_COOLDOWN_SECONDS=120
+RUNPOD_SCALE_DOWN_COOLDOWN_SECONDS=300
+RUNPOD_MAX_WARM_PODS_TO_CREATE_PER_TICK=1
+RUNPOD_ESTIMATED_GENERATION_SPEED_FACTOR=20
+RUNPOD_MAX_ESTIMATED_GPU_MINUTES_PER_TICK=240
+RUNPOD_MAX_ESTIMATED_HOURLY_GPU_COST_USD=3.00
+RUNPOD_ESTIMATED_POD_HOURLY_COST_USD=0.80
+RUNPOD_DEFAULT_JOB_DURATION_SECONDS=60
 RUNPOD_CREATE_MAX_ATTEMPTS=3
 RUNPOD_CREATE_RETRY_SLEEP_SECONDS=20
 RUNPOD_WAITING_GPU_ENABLED=true
@@ -262,6 +274,15 @@ How it works:
   the job moves to `waiting_for_pod`, keeps the balance frozen, and retries after
   `RUNPOD_QUEUE_RETRY_SECONDS`. If it waits longer than
   `RUNPOD_QUEUE_MAX_WAIT_MINUTES`, the job fails and refunds.
+- Stage 8.4 adds queue-time autoscaling. One generation job still runs on one pod; the
+  worker does not distribute one job's segments across multiple pods. The autoscaler
+  estimates workload as:
+  `pending_gpu_minutes = sum(job_duration_minutes * RUNPOD_ESTIMATED_GENERATION_SPEED_FACTOR)`.
+  Then `desired_pods = ceil(pending_gpu_minutes / RUNPOD_TARGET_QUEUE_WAIT_MINUTES)`.
+  Desired pods are capped by `RUNPOD_MAX_ACTIVE_PODS`, by the estimated hourly cost cap,
+  and are never lower than the number of busy pods. Defaults are conservative:
+  `RUNPOD_MAX_ACTIVE_PODS=1`, `RUNPOD_MIN_WARM_PODS=0`, and
+  `RUNPOD_MAX_ESTIMATED_HOURLY_GPU_COST_USD=3.00`.
 
 Example fallback logs:
 
@@ -276,6 +297,7 @@ Debug commands:
 
 ```bash
 curl http://localhost:8000/api/v1/debug/runpod/pods
+curl http://localhost:8000/api/v1/debug/runpod/autoscaling-plan
 curl -X POST http://localhost:8000/api/v1/debug/runpod/create-pod
 curl -X POST http://localhost:8000/api/v1/debug/runpod/cleanup-idle
 curl -X POST http://localhost:8000/api/v1/debug/runpod/keeper-tick
@@ -739,8 +761,13 @@ ComfyUI troubleshooting:
   warm pods for queued, `waiting_for_gpu`, or `waiting_for_pod` work, and it terminates
   idle pods older than `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES`.
 - The keeper response includes `active_pods`, `busy_pods`, `idle_pods`,
-  `pending_jobs`, `desired_active_pods`, and `created_warm_pods`. MVP desired count is
-  `min(RUNPOD_MAX_ACTIVE_PODS, queued + waiting_for_gpu + waiting_for_pod jobs)`.
+  `pending_jobs`, `desired_active_pods`, `created_warm_pods`, and `autoscaling`.
+  Inspect the read-only autoscaling decision with
+  `GET /api/v1/debug/runpod/autoscaling-plan`.
+- Autoscaling can be disabled with `RUNPOD_AUTOSCALING_ENABLED=false`; the keeper then
+  falls back to Stage 8.3 behavior. Unknown strategies also fall back conservatively.
+- Stage 8.4 does not implement distributed segment generation inside one job. That is
+  reserved for a later stage.
 - `No mp4 output found in ComfyUI history`: check that the workflow's
   `VHS_VideoCombine` node writes an `.mp4` and that node `317` is present.
 - `LoadAudio did not receive file`: check `COMFYUI_INPUT_SUBFOLDER`, the node `125`

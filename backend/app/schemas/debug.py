@@ -211,8 +211,28 @@ class DebugRunPodCleanupResponse(BaseModel):
     pod_ids: list[str]
 
 
+class DebugRunPodAutoscalingPlanResponse(BaseModel):
+    enabled: bool
+    strategy: str
+    pending_jobs: int
+    pending_gpu_minutes: Decimal
+    target_queue_wait_minutes: int
+    active_pods: int
+    busy_pods: int
+    idle_pods: int
+    max_active_pods: int
+    min_warm_pods: int
+    estimated_pod_hourly_cost_usd: Decimal
+    max_estimated_hourly_cost_usd: Decimal
+    desired_active_pods: int
+    pods_to_create: int
+    pods_to_terminate: int
+    reason: str
+
+
 class DebugRunPodKeeperTickResponse(BaseModel):
     enabled: bool
+    autoscaling: DebugRunPodAutoscalingPlanResponse | None = None
     active_pods: int
     busy_pods: int | None = None
     idle_pods: int | None = None
