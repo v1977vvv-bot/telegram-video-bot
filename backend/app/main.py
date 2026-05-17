@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api.v1.router import api_router
+from backend.app.core.config_sanity import validate_startup_config
 from backend.app.core.cors import parse_cors_origins
 from backend.app.core.error_handlers import register_exception_handlers
 from backend.app.core.redis import close_redis, ping_redis
@@ -23,6 +24,7 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting backend service env=%s", settings.app_env)
+    validate_startup_config(settings)
     await ping_database()
     await ping_redis()
     logger.info("Backend dependencies are reachable")

@@ -201,10 +201,13 @@ def _format_generation_item(index: int, item: GenerationHistoryItemDto) -> str:
         result += f"\nОшибка: {safe_html(item.error_message, max_len=300)}"
     elif item.status == "waiting_for_gpu":
         result += (
-            "\nРезультат: ⏳ Ожидаем доступный GPU. " "Задача в очереди, средства пока не списаны."
+            "\nРезультат: ⏳ Ожидаем доступный GPU. " "Средства зарезервированы, но не списаны."
         )
     elif item.status == "waiting_for_pod":
-        result += "\nРезультат: ⏳ Задача ожидает свободный GPU. Средства пока не списаны."
+        result += (
+            "\nРезультат: ⏳ Задача ожидает свободный GPU. "
+            "Средства зарезервированы, но не списаны."
+        )
     elif item.status in {"queued", "generating"}:
         result += "\nРезультат: ещё не готов"
     return result

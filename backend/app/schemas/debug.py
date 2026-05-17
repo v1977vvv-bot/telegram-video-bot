@@ -284,3 +284,12 @@ class DebugGenerationJobsResponse(BaseModel):
 class DebugRetryWaitingGpuResponse(BaseModel):
     enqueued: int
     job_ids: list[UUID]
+
+
+class DebugOpsAnomaliesResponse(BaseModel):
+    stale_generating_jobs: list[dict[str, Any]]
+    stale_waiting_jobs: list[dict[str, Any]]
+    orphan_busy_pods: list[dict[str, Any]]
+    active_pods_without_base_url: list[dict[str, Any]]
+    terminal_jobs_with_retry_fields: list[dict[str, Any]]
+    pods_busy_without_job: list[dict[str, Any]]

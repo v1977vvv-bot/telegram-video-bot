@@ -13,11 +13,12 @@ from uuid import UUID
 import anyio
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.app.core.debug_access import require_debug_access
 from backend.app.models.balance_account import BalanceAccount
 from backend.app.models.balance_transaction import BalanceTransaction
 from backend.app.models.generation_job import GenerationJob
@@ -44,6 +45,7 @@ from backend.app.schemas.debug import (
     DebugGenerationSegmentResponse,
     DebugLedgerJobResponse,
     DebugLedgerTransactionResponse,
+    DebugOpsAnomaliesResponse,
     DebugRepairFrozenBalancesResponse,
     DebugRetryWaitingGpuResponse,
     DebugRunPodAutoscalingPlanResponse,
@@ -87,7 +89,7 @@ from worker.app.services.workflow_patcher import (
     validate_infinite_talk_workflow,
 )
 
-router = APIRouter(prefix="/debug", tags=["debug"])
+router = APIRouter(prefix="/debug", tags=["debug"], dependencies=[Depends(require_debug_access)])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 MONEY_QUANT = Decimal("0.0001")
 logger = logging.getLogger(__name__)
@@ -108,6 +110,12 @@ FAIL_REFUND_ALLOWED_JOB_STATUSES = {
     JobStatus.CANCELLED.value,
     JobStatus.FAILED.value,
 }
+TERMINAL_GENERATION_JOB_STATUSES = {
+    JobStatus.COMPLETED.value,
+    JobStatus.FAILED.value,
+    JobStatus.CANCELLED.value,
+}
+ACTIVE_RUNPOD_POD_STATUSES = {"creating", "starting", "ready", "idle", "busy"}
 
 
 @router.post("/enqueue-ping", response_model=DebugTaskResponse)
@@ -728,6 +736,123 @@ async def list_debug_generation_jobs(
     return DebugGenerationJobsResponse(items=items)
 
 
+@router.get("/ops/anomalies", response_model=DebugOpsAnomaliesResponse)
+async def get_debug_ops_anomalies(session: SessionDep) -> DebugOpsAnomaliesResponse:
+    _require_local_env()
+
+    settings = get_settings()
+    now = datetime.now(UTC)
+    generating_cutoff = now - timedelta(seconds=max(settings.comfyui_timeout_seconds + 1800, 7200))
+    gpu_wait_cutoff = now - timedelta(minutes=settings.runpod_waiting_gpu_max_wait_minutes)
+    pod_wait_cutoff = now - timedelta(minutes=settings.runpod_queue_max_wait_minutes)
+
+    stale_generating_result = await session.execute(
+        select(GenerationJob)
+        .where(
+            GenerationJob.status.in_(
+                [
+                    JobStatus.POD_STARTING.value,
+                    JobStatus.UPLOADING_INPUTS.value,
+                    JobStatus.GENERATING.value,
+                    JobStatus.STITCHING.value,
+                    JobStatus.UPLOADING_RESULT.value,
+                    "processing",
+                    "running",
+                ]
+            ),
+            GenerationJob.updated_at < generating_cutoff,
+        )
+        .order_by(GenerationJob.updated_at.asc())
+        .limit(20)
+    )
+    stale_waiting_result = await session.execute(
+        select(GenerationJob)
+        .where(
+            or_(
+                and_(
+                    GenerationJob.status == JobStatus.WAITING_FOR_GPU.value,
+                    GenerationJob.waiting_for_gpu_since.is_not(None),
+                    GenerationJob.waiting_for_gpu_since < gpu_wait_cutoff,
+                ),
+                and_(
+                    GenerationJob.status == JobStatus.WAITING_FOR_POD.value,
+                    GenerationJob.waiting_for_pod_since.is_not(None),
+                    GenerationJob.waiting_for_pod_since < pod_wait_cutoff,
+                ),
+            )
+        )
+        .order_by(GenerationJob.updated_at.asc())
+        .limit(20)
+    )
+    orphan_busy_result = await session.execute(
+        select(RunpodPod)
+        .where(
+            RunpodPod.status == "busy",
+            RunpodPod.active_job_id.is_(None),
+            RunpodPod.current_job_id.is_(None),
+            RunpodPod.terminated_at.is_(None),
+        )
+        .order_by(RunpodPod.updated_at.asc())
+        .limit(20)
+    )
+    active_without_base_url_result = await session.execute(
+        select(RunpodPod)
+        .where(
+            RunpodPod.status.in_(ACTIVE_RUNPOD_POD_STATUSES),
+            RunpodPod.terminated_at.is_(None),
+            RunpodPod.base_url.is_(None),
+            RunpodPod.comfyui_url.is_(None),
+        )
+        .order_by(RunpodPod.updated_at.asc())
+        .limit(20)
+    )
+    terminal_retry_fields_result = await session.execute(
+        select(GenerationJob)
+        .where(
+            GenerationJob.status.in_(TERMINAL_GENERATION_JOB_STATUSES),
+            or_(
+                GenerationJob.next_retry_at.is_not(None),
+                GenerationJob.waiting_for_gpu_since.is_not(None),
+                GenerationJob.waiting_for_pod_since.is_not(None),
+            ),
+        )
+        .order_by(GenerationJob.updated_at.desc())
+        .limit(20)
+    )
+
+    busy_pods_result = await session.execute(
+        select(RunpodPod)
+        .where(
+            RunpodPod.status == "busy",
+            RunpodPod.terminated_at.is_(None),
+            or_(RunpodPod.active_job_id.is_not(None), RunpodPod.current_job_id.is_not(None)),
+        )
+        .order_by(RunpodPod.updated_at.asc())
+        .limit(20)
+    )
+    pods_busy_without_job: list[dict[str, Any]] = []
+    for pod in busy_pods_result.scalars():
+        active_job_id = pod.active_job_id or pod.current_job_id
+        job = await session.get(GenerationJob, active_job_id) if active_job_id else None
+        if job is None or job.status in TERMINAL_GENERATION_JOB_STATUSES:
+            item = _pod_anomaly_item(pod)
+            item["linked_job_status"] = job.status if job else None
+            pods_busy_without_job.append(item)
+
+    return DebugOpsAnomaliesResponse(
+        stale_generating_jobs=[_job_anomaly_item(job) for job in stale_generating_result.scalars()],
+        stale_waiting_jobs=[_job_anomaly_item(job) for job in stale_waiting_result.scalars()],
+        orphan_busy_pods=[_pod_anomaly_item(pod) for pod in orphan_busy_result.scalars()],
+        active_pods_without_base_url=[
+            _pod_anomaly_item(pod) for pod in active_without_base_url_result.scalars()
+        ],
+        terminal_jobs_with_retry_fields=[
+            _job_anomaly_item(job) for job in terminal_retry_fields_result.scalars()
+        ],
+        pods_busy_without_job=pods_busy_without_job,
+    )
+
+
 async def _retry_debug_waiting_jobs(
     *,
     session: AsyncSession,
@@ -1307,6 +1432,41 @@ def _runpod_pod_response(pod: RunpodPod) -> DebugRunPodPodResponse:
         updated_at=pod.updated_at,
         terminated_at=pod.terminated_at,
     )
+
+
+def _job_anomaly_item(job: GenerationJob) -> dict[str, Any]:
+    return {
+        "id": str(job.id),
+        "status": job.status,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "waiting_for_gpu_since": (
+            job.waiting_for_gpu_since.isoformat() if job.waiting_for_gpu_since else None
+        ),
+        "waiting_for_pod_since": (
+            job.waiting_for_pod_since.isoformat() if job.waiting_for_pod_since else None
+        ),
+        "next_retry_at": job.next_retry_at.isoformat() if job.next_retry_at else None,
+    }
+
+
+def _pod_anomaly_item(pod: RunpodPod) -> dict[str, Any]:
+    return {
+        "id": str(pod.id),
+        "runpod_pod_id": pod.runpod_pod_id,
+        "status": pod.status,
+        "base_url": pod.base_url or pod.comfyui_url,
+        "active_job_id": str(pod.active_job_id or pod.current_job_id)
+        if pod.active_job_id or pod.current_job_id
+        else None,
+        "created_at": pod.created_at.isoformat(),
+        "updated_at": pod.updated_at.isoformat(),
+        "last_used_at": (pod.last_used_at or pod.last_busy_at).isoformat()
+        if pod.last_used_at or pod.last_busy_at
+        else None,
+        "terminated_at": pod.terminated_at.isoformat() if pod.terminated_at else None,
+    }
 
 
 def _require_local_env() -> None:

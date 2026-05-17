@@ -6,6 +6,8 @@ photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomu
 ## What is implemented now
 
 - FastAPI backend with `/health`, `/api/v1/health`, `/api/v1/settings/public`.
+- Safe operational status endpoint: `GET /api/v1/ops/status`.
+- Startup configuration sanity checks for production launch-critical settings.
 - Telegram user upsert endpoint: `POST /api/v1/telegram/users/upsert`.
 - User statistics endpoint: `GET /api/v1/users/by-telegram/{telegram_id}/statistics`.
 - User generation history endpoint: `GET /api/v1/users/by-telegram/{telegram_id}/generations`.
@@ -20,6 +22,7 @@ photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomu
 - Local debug workflow validation endpoint: `POST /api/v1/debug/comfyui/validate-workflow`.
 - Local debug workflow patch preview endpoint: `POST /api/v1/debug/comfyui/patch-workflow-preview`.
 - Local debug Telegram notification endpoint: `POST /api/v1/debug/telegram/test-notification`.
+- Local debug operations anomalies endpoint: `GET /api/v1/debug/ops/anomalies`.
 - Local debug segment status endpoint: `GET /api/v1/debug/generation/jobs/{job_id}/segments`.
 - Local debug audio segment-plan endpoint: `POST /api/v1/debug/audio/segment-plan`.
 - Local debug RunPod pod endpoints: `GET /api/v1/debug/runpod/pods`,
@@ -70,6 +73,12 @@ Fill real secrets where needed:
 - `CLOUDFLARE_R2_*`
 - `CRYPTOMUS_*`
 - `RUNPOD_*`
+
+For production, set `APP_ENV=production`. `.env.example` keeps safe MVP launch defaults:
+distributed generation disabled, `RUNPOD_MAX_ACTIVE_PODS=1`, `RUNPOD_MIN_WARM_PODS=0`,
+and debug endpoints enabled only for local development. Use
+`DEBUG_ENDPOINTS_ENABLED=false` or `DEBUG_ENDPOINTS_LOCAL_ONLY=true` before exposing a
+production backend.
 
 Select storage provider:
 
@@ -325,6 +334,7 @@ Debug commands:
 ```bash
 curl http://localhost:8000/api/v1/debug/runpod/pods
 curl http://localhost:8000/api/v1/debug/runpod/autoscaling-plan
+curl http://localhost:8000/api/v1/debug/ops/anomalies
 curl -X POST http://localhost:8000/api/v1/debug/runpod/create-pod
 curl -X POST http://localhost:8000/api/v1/debug/runpod/cleanup-idle
 curl -X POST http://localhost:8000/api/v1/debug/runpod/keeper-tick
@@ -729,6 +739,73 @@ docker compose exec backend alembic upgrade head
 docker compose exec worker celery -A worker.app.main.celery_app inspect registered
 ```
 
+## MVP Launch Checklist
+
+Pre-launch environment:
+
+- Set `APP_ENV=production`.
+- Set real `TELEGRAM_BOT_TOKEN`, `CRYPTOMUS_*`, `RUNPOD_API_KEY`,
+  `RUNPOD_TEMPLATE_ID`, PostgreSQL, Redis, and `CLOUDFLARE_R2_*` values.
+- Keep `DISTRIBUTED_SEGMENT_GENERATION_ENABLED=false` for MVP launch.
+- Keep `RUNPOD_MAX_ACTIVE_PODS` low, normally `1`, until cost and pod locking are
+  monitored in production.
+- Keep `RUNPOD_MIN_WARM_PODS=0` unless warm capacity cost is intentional.
+- Keep `RUNPOD_AUTO_TERMINATE=true`, `RUNPOD_KEEPER_ENABLED=true`,
+  `RUNPOD_WAITING_GPU_ENABLED=true`, and `RUNPOD_QUEUE_WAIT_ENABLED=true`.
+- Keep `CELERY_WORKER_CONCURRENCY=1` for MVP unless multi-worker locking has been
+  explicitly load-tested.
+- Set `DEBUG_ENDPOINTS_ENABLED=false` in production, or keep
+  `DEBUG_ENDPOINTS_LOCAL_ONLY=true` behind private network controls.
+
+Production startup runs a config sanity check. Missing critical production secrets
+fail backend startup when `APP_ENV=production`; local and staging environments log
+warnings without printing secret values.
+
+Launch commands:
+
+```bash
+docker compose up --build -d
+docker compose exec backend alembic upgrade head
+curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/api/v1/ops/status
+docker compose logs -f backend bot worker
+```
+
+Local-only operational checks:
+
+```bash
+curl http://localhost:8000/api/v1/debug/runpod/pods
+curl http://localhost:8000/api/v1/debug/generation/jobs?limit=20
+curl http://localhost:8000/api/v1/debug/runpod/autoscaling-plan
+curl http://localhost:8000/api/v1/debug/ops/anomalies
+```
+
+RunPod safety commands:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/debug/runpod/keeper-tick
+curl -X POST http://localhost:8000/api/v1/debug/generation/retry-waiting
+curl -X POST http://localhost:8000/api/v1/debug/generation/jobs/{job_id}/fail-refund
+curl -X DELETE http://localhost:8000/api/v1/debug/runpod/pods/{runpod_pod_id}
+```
+
+Rollback:
+
+- Revert the last application commit with `git revert <commit>`.
+- Rebuild services: `docker compose up --build -d`.
+- If a migration must be rolled back, run the matching `alembic downgrade` only after
+  checking whether production data depends on the new schema.
+- Terminate live RunPod pods if the rollback stops the worker or changes the template
+  contract.
+
+Emergency controls:
+
+- Stop new processing by stopping the worker: `docker compose stop worker`.
+- Prevent new pods by setting `RUNPOD_MAX_ACTIVE_PODS=0` and restarting the worker.
+- Terminate active RunPod pods through the local debug endpoint or RunPod dashboard.
+- Use `fail-refund` for stuck queued/generating/waiting jobs after verifying they did
+  not already capture balance.
+
 ## Troubleshooting
 
 If Celery logs show `Event loop is closed`, `got Future attached to a different loop`,
@@ -738,6 +815,11 @@ development, `CELERY_WORKER_CONCURRENCY=1` is the default in `.env.example`; thi
 a safety setting, not the core fix.
 
 The worker image runs as a non-root `appuser` to avoid Celery's root warning.
+
+Debug endpoints are protected by `DEBUG_ENDPOINTS_ENABLED` and
+`DEBUG_ENDPOINTS_LOCAL_ONLY`. Keep them disabled or local-only in production; destructive
+endpoints such as pod termination, `fail-refund`, keeper tick, and waiting-job retries
+must never be exposed publicly.
 
 If a local database already contains jobs from an older worker build, a failed or
 cancelled job can leave `balance_accounts.frozen_usd` above zero. Use:
@@ -772,6 +854,10 @@ ComfyUI troubleshooting:
   Manual local retry is available through
   `POST /api/v1/debug/generation/retry-waiting-gpu`; it changes eligible
   `waiting_for_gpu` jobs back to `queued` and enqueues `process_generation_job`.
+- Read-only operational anomalies can be inspected with
+  `GET /api/v1/debug/ops/anomalies`. It reports stale generating/waiting jobs,
+  orphan busy pods, active pods without endpoint URLs, terminal jobs with stale retry
+  fields, and busy pods linked to missing or terminal jobs.
 - Pool-full jobs use status `waiting_for_pod`. They mean the configured pod pool is
   busy or at `RUNPOD_MAX_ACTIVE_PODS`, not that RunPod capacity is unavailable.
   Retry both waiting states with `POST /api/v1/debug/generation/retry-waiting`.

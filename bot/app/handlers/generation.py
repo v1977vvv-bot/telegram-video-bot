@@ -183,6 +183,8 @@ async def handle_generation_confirm(callback: CallbackQuery, state: FSMContext) 
         "✅ Задача поставлена в очередь.\n"
         f"ID: {result.job_id}\n"
         f"Стоимость заморожена: ${_money(result.price_usd)}\n"
+        "Средства зарезервированы и будут списаны только после успешной генерации. "
+        "Если генерация не получится, сумма вернётся на баланс.\n"
         f"{mode_note}"
         "Вы можете поставить ещё одну задачу.",
         reply_markup=main_menu_keyboard(),

@@ -63,7 +63,7 @@ class TelegramNotifyService:
         text = (
             "⏳ GPU сейчас недоступен\n\n"
             f"ID: {_short_id(notification.job_id)}\n"
-            "Задача поставлена в очередь. Средства пока не списаны.\n"
+            "Задача поставлена в очередь. Средства зарезервированы, но не списаны.\n"
             "Мы попробуем снова автоматически."
         )
         return self._send_message(notification.telegram_id, text)
@@ -72,7 +72,7 @@ class TelegramNotifyService:
         text = (
             "⏳ Все GPU сейчас заняты\n\n"
             f"ID: {_short_id(notification.job_id)}\n"
-            "Задача ожидает свободный GPU. Средства пока не списаны.\n"
+            "Задача ожидает свободный GPU. Средства зарезервированы, но не списаны.\n"
             "Мы попробуем снова автоматически."
         )
         return self._send_message(notification.telegram_id, text)
