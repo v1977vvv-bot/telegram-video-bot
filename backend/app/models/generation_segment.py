@@ -45,6 +45,8 @@ class GenerationSegment(TimestampMixin, Base):
         PG_UUID(as_uuid=True),
         ForeignKey("uploaded_files.id", ondelete="SET NULL"),
     )
+    runpod_pod_id: Mapped[str | None] = mapped_column(Text)
+    prompt_id: Mapped[str | None] = mapped_column(Text)
     error_message: Mapped[str | None] = mapped_column(Text)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -132,6 +132,9 @@ class DebugTelegramTestNotificationResponse(BaseModel):
 class DebugGenerationSegmentResponse(BaseModel):
     segment_index: int
     status: str
+    attempts: int
+    runpod_pod_id: str | None = None
+    prompt_id: str | None = None
     audio_start_seconds: Decimal
     audio_end_seconds: Decimal
     duration_seconds: Decimal

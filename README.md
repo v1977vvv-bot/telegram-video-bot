@@ -224,6 +224,17 @@ RUNPOD_WAITING_GPU_MAX_WAIT_MINUTES=30
 RUNPOD_QUEUE_WAIT_ENABLED=true
 RUNPOD_QUEUE_RETRY_SECONDS=60
 RUNPOD_QUEUE_MAX_WAIT_MINUTES=60
+
+DISTRIBUTED_SEGMENT_GENERATION_ENABLED=false
+DISTRIBUTED_MIN_AUDIO_DURATION_SECONDS=60
+DISTRIBUTED_MAX_PARALLEL_SEGMENTS_PER_JOB=2
+DISTRIBUTED_SEGMENT_TARGET_SECONDS=30
+DISTRIBUTED_SEGMENT_MAX_RETRIES=2
+DISTRIBUTED_REQUIRE_WARM_PODS=true
+DISTRIBUTED_ALLOW_CREATE_EXTRA_PODS=false
+DISTRIBUTED_STITCH_STRATEGY=concat
+DISTRIBUTED_EXPERIMENTAL_LOGGING=true
+DISTRIBUTED_SEGMENT_IMAGE_STRATEGY=source_image
 ```
 
 How it works:
@@ -283,6 +294,13 @@ How it works:
   and are never lower than the number of busy pods. Defaults are conservative:
   `RUNPOD_MAX_ACTIVE_PODS=1`, `RUNPOD_MIN_WARM_PODS=0`, and
   `RUNPOD_MAX_ESTIMATED_HOURLY_GPU_COST_USD=3.00`.
+- Stage 8.5 adds experimental distributed segment generation behind
+  `DISTRIBUTED_SEGMENT_GENERATION_ENABLED=false` by default. When enabled, long jobs
+  can run independent audio segments on multiple already-warm RunPod pods, then stitch
+  the segment mp4 files in segment order and remux the final result with the original
+  full audio. The stable single-pod path remains the fallback. MVP distributed mode uses
+  `DISTRIBUTED_SEGMENT_IMAGE_STRATEGY=source_image`, so each segment starts from the
+  original uploaded image rather than the previous segment's last frame.
 
 Example fallback logs:
 
@@ -766,8 +784,15 @@ ComfyUI troubleshooting:
   `GET /api/v1/debug/runpod/autoscaling-plan`.
 - Autoscaling can be disabled with `RUNPOD_AUTOSCALING_ENABLED=false`; the keeper then
   falls back to Stage 8.3 behavior. Unknown strategies also fall back conservatively.
-- Stage 8.4 does not implement distributed segment generation inside one job. That is
-  reserved for a later stage.
+- Distributed segment generation is experimental and disabled by default. If it is
+  enabled but the job is short, has one segment, lacks enough warm idle pods, or uses an
+  unsupported strategy, the worker logs `Distributed generation skipped reason=...` and
+  falls back to the stable single-pod path.
+- Distributed mode does not change user pricing yet. Using multiple pods can increase
+  infrastructure cost for the same user price.
+- Debug per-segment assignment with
+  `GET /api/v1/debug/generation/jobs/{job_id}/segments`; it includes attempts,
+  `runpod_pod_id`, and `prompt_id` when distributed mode runs.
 - `No mp4 output found in ComfyUI history`: check that the workflow's
   `VHS_VideoCombine` node writes an `.mp4` and that node `317` is present.
 - `LoadAudio did not receive file`: check `COMFYUI_INPUT_SUBFOLDER`, the node `125`

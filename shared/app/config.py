@@ -98,6 +98,17 @@ class Settings(BaseSettings):
     runpod_queue_retry_seconds: int = 60
     runpod_queue_max_wait_minutes: int = 60
 
+    distributed_segment_generation_enabled: bool = False
+    distributed_min_audio_duration_seconds: int = 60
+    distributed_max_parallel_segments_per_job: int = 2
+    distributed_segment_target_seconds: int = 30
+    distributed_segment_max_retries: int = 2
+    distributed_require_warm_pods: bool = True
+    distributed_allow_create_extra_pods: bool = False
+    distributed_stitch_strategy: str = "concat"
+    distributed_experimental_logging: bool = True
+    distributed_segment_image_strategy: str = "source_image"
+
     generation_mode: str = "mock"
     comfyui_port: int = 8188
     comfyui_base_url: str = "http://localhost:8188"

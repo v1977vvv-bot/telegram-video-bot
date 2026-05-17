@@ -28,6 +28,7 @@ from worker.app.database import get_worker_session
 from worker.app.services.audio import AudioSegmentFile, AudioSegmentPlan, AudioService
 from worker.app.services.balance import SyncBalanceService
 from worker.app.services.comfyui_client import ComfyUIClient
+from worker.app.services.distributed_generation import DistributedSegmentGenerationService
 from worker.app.services.runpod import NoGpuAvailableError, RunPodPoolFullError
 from worker.app.services.runpod_manager import ManagedComfyUIEndpoint, RunPodManager
 from worker.app.services.storage import WorkerStorageService
@@ -214,52 +215,15 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
     client: ComfyUIClient | None = None
     runpod_manager = RunPodManager(settings)
     try:
-        try:
-            with get_worker_session() as session:
-                endpoint = runpod_manager.ensure_comfyui_endpoint(session, job_id=job_id)
-        except NoGpuAvailableError as exc:
-            if not settings.runpod_waiting_gpu_enabled:
-                raise
-            wait_result = _handle_no_gpu_available(job_id, settings, _safe_error_message(exc))
-            if wait_result.status == JobStatus.WAITING_FOR_GPU.value:
-                _notify_generation_waiting_for_gpu(wait_result.notification)
-                _schedule_waiting_retry(settings.runpod_waiting_gpu_retry_seconds)
-                return {"status": JobStatus.WAITING_FOR_GPU.value, "job_id": str(job_id)}
-
-            notification = _mark_job_failed(
-                job_id,
-                "GPU unavailable for too long. Funds returned.",
-            )
-            _notify_generation_failed(notification)
-            return {"status": JobStatus.FAILED.value, "job_id": str(job_id)}
-        except RunPodPoolFullError as exc:
-            if not settings.runpod_queue_wait_enabled:
-                raise
-            wait_result = _handle_runpod_pool_full(job_id, settings, _safe_error_message(exc))
-            if wait_result.status == JobStatus.WAITING_FOR_POD.value:
-                _notify_generation_waiting_for_pod(wait_result.notification)
-                _schedule_waiting_retry(settings.runpod_queue_retry_seconds)
-                return {"status": JobStatus.WAITING_FOR_POD.value, "job_id": str(job_id)}
-
-            notification = _mark_job_failed(
-                job_id,
-                "Queue wait exceeded. Funds returned.",
-            )
-            _notify_generation_failed(notification)
-            return {"status": JobStatus.FAILED.value, "job_id": str(job_id)}
-
-        client = ComfyUIClient(settings, base_url=endpoint.base_url)
-
         with get_worker_session() as session:
             storage = WorkerStorageService(session, settings)
             image_path = storage.download_to_temp(context.source_image_file_id, input_dir)
             audio_path = storage.download_to_temp(context.source_audio_file_id, input_dir)
 
-        client.healthcheck()
         audio_service = AudioService()
         audio_plan = audio_service.build_segment_plan(
             input_audio_path=audio_path,
-            max_segment_seconds=settings.generation_max_segment_seconds,
+            max_segment_seconds=_segment_target_seconds(settings),
             total_duration_seconds=context.audio_duration_seconds,
             strategy=settings.audio_segmentation_strategy,
             silence_threshold_db=settings.audio_silence_threshold_db,
@@ -275,6 +239,59 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
             boundaries=audio_plan.boundaries,
         )
         _validate_audio_segments(job_id, context, audio_segments)
+
+        distributed_service = DistributedSegmentGenerationService(
+            settings,
+            runpod_manager=runpod_manager,
+        )
+        distributed_parallelism = _distributed_parallelism_or_none(
+            settings=settings,
+            context=context,
+            distributed_service=distributed_service,
+        )
+        if distributed_parallelism is not None:
+            result = distributed_service.run(
+                context=context,
+                segments=context.segments,
+                audio_segments=audio_segments,
+                source_image_path=image_path,
+                output_dir=segments_dir,
+                parallelism=distributed_parallelism,
+            )
+            logger.info(
+                "Distributed stitching started job_id=%s segments_count=%s parallelism=%s",
+                job_id,
+                len(result.segment_paths),
+                result.parallelism,
+            )
+            final_path = _build_final_video(
+                job_id=job_id,
+                context=context,
+                segment_paths=result.segment_paths,
+                final_dir=final_dir,
+                original_audio_path=audio_path,
+            )
+            logger.info("Distributed stitching completed job_id=%s path=%s", job_id, final_path)
+            notification = _complete_comfyui_job(job_id, context, final_path)
+            _notify_generation_completed(notification)
+            success = True
+            logger.info(
+                "process_generation_job distributed comfyui completed job_id=%s segments_count=%s",
+                job_id,
+                len(context.segments),
+            )
+            return {"status": "completed", "job_id": str(job_id)}
+
+        endpoint_result = _acquire_single_comfyui_endpoint_or_wait(
+            job_id=job_id,
+            settings=settings,
+            runpod_manager=runpod_manager,
+        )
+        if isinstance(endpoint_result, dict):
+            return endpoint_result
+        endpoint = endpoint_result
+        client = ComfyUIClient(settings, base_url=endpoint.base_url)
+        client.healthcheck()
 
         current_image_path = image_path
         segment_paths: list[Path] = []
@@ -378,6 +395,122 @@ def _release_runpod_endpoint_after_failure(
             manager.release_after_failure(session, endpoint)
     except Exception:
         logger.warning("RunPod pod failure release failed pod_id=%s", endpoint.runpod_pod_id)
+
+
+def _acquire_single_comfyui_endpoint_or_wait(
+    *,
+    job_id: UUID,
+    settings: Settings,
+    runpod_manager: RunPodManager,
+) -> ManagedComfyUIEndpoint | dict[str, str]:
+    try:
+        with get_worker_session() as session:
+            return runpod_manager.ensure_comfyui_endpoint(session, job_id=job_id)
+    except NoGpuAvailableError as exc:
+        if not settings.runpod_waiting_gpu_enabled:
+            raise
+        wait_result = _handle_no_gpu_available(job_id, settings, _safe_error_message(exc))
+        if wait_result.status == JobStatus.WAITING_FOR_GPU.value:
+            _notify_generation_waiting_for_gpu(wait_result.notification)
+            _schedule_waiting_retry(settings.runpod_waiting_gpu_retry_seconds)
+            return {"status": JobStatus.WAITING_FOR_GPU.value, "job_id": str(job_id)}
+
+        notification = _mark_job_failed(
+            job_id,
+            "GPU unavailable for too long. Funds returned.",
+        )
+        _notify_generation_failed(notification)
+        return {"status": JobStatus.FAILED.value, "job_id": str(job_id)}
+    except RunPodPoolFullError as exc:
+        if not settings.runpod_queue_wait_enabled:
+            raise
+        wait_result = _handle_runpod_pool_full(job_id, settings, _safe_error_message(exc))
+        if wait_result.status == JobStatus.WAITING_FOR_POD.value:
+            _notify_generation_waiting_for_pod(wait_result.notification)
+            _schedule_waiting_retry(settings.runpod_queue_retry_seconds)
+            return {"status": JobStatus.WAITING_FOR_POD.value, "job_id": str(job_id)}
+
+        notification = _mark_job_failed(
+            job_id,
+            "Queue wait exceeded. Funds returned.",
+        )
+        _notify_generation_failed(notification)
+        return {"status": JobStatus.FAILED.value, "job_id": str(job_id)}
+
+
+def _segment_target_seconds(settings: Settings) -> int:
+    if settings.distributed_segment_generation_enabled:
+        return max(settings.distributed_segment_target_seconds, 1)
+    return settings.generation_max_segment_seconds
+
+
+def _distributed_parallelism_or_none(
+    *,
+    settings: Settings,
+    context: ComfyUIJobContext,
+    distributed_service: DistributedSegmentGenerationService,
+) -> int | None:
+    reason = _distributed_skip_reason(settings, context)
+    if reason is not None:
+        logger.info("Distributed generation skipped job_id=%s reason=%s", context.job_id, reason)
+        return None
+
+    desired_parallelism = min(
+        len(context.segments),
+        max(settings.distributed_max_parallel_segments_per_job, 1),
+    )
+    healthy_idle_pods = distributed_service.available_healthy_idle_pod_count(
+        limit=desired_parallelism,
+    )
+    if settings.distributed_require_warm_pods and healthy_idle_pods < desired_parallelism:
+        logger.info(
+            "Distributed generation skipped job_id=%s reason=not_enough_warm_pods "
+            "healthy_idle_pods=%s desired_parallelism=%s",
+            context.job_id,
+            healthy_idle_pods,
+            desired_parallelism,
+        )
+        return None
+
+    if healthy_idle_pods < 2 and not settings.distributed_allow_create_extra_pods:
+        logger.info(
+            "Distributed generation skipped job_id=%s reason=parallelism_below_two "
+            "healthy_idle_pods=%s",
+            context.job_id,
+            healthy_idle_pods,
+        )
+        return None
+
+    parallelism = min(desired_parallelism, max(healthy_idle_pods, 1))
+    if settings.distributed_allow_create_extra_pods:
+        parallelism = desired_parallelism
+    logger.info(
+        "Distributed generation selected job_id=%s segments_count=%s parallelism=%s "
+        "healthy_idle_pods=%s",
+        context.job_id,
+        len(context.segments),
+        parallelism,
+        healthy_idle_pods,
+    )
+    return parallelism
+
+
+def _distributed_skip_reason(
+    settings: Settings,
+    context: ComfyUIJobContext,
+) -> str | None:
+    if not settings.distributed_segment_generation_enabled:
+        return "feature_flag_disabled"
+    if context.audio_duration_seconds < Decimal(settings.distributed_min_audio_duration_seconds):
+        return "audio_shorter_than_minimum"
+    if len(context.segments) < 2:
+        return "single_segment_job"
+    if settings.distributed_stitch_strategy.strip().lower() != "concat":
+        return "unsupported_stitch_strategy"
+    image_strategy = settings.distributed_segment_image_strategy.strip().lower()
+    if image_strategy != SegmentImageStrategy.SOURCE_IMAGE.value:
+        return "distributed_requires_source_image_strategy"
+    return None
 
 
 def _handle_no_gpu_available(

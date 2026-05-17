@@ -80,6 +80,7 @@ class PodStatus(StrEnum):
 
 class SegmentStatus(StrEnum):
     PENDING = "pending"
+    ASSIGNED = "assigned"
     QUEUED = "queued"
     GENERATING = "generating"
     COMPLETED = "completed"

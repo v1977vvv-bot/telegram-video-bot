@@ -396,6 +396,9 @@ async def get_debug_generation_job_segments(
             DebugGenerationSegmentResponse(
                 segment_index=segment.segment_index,
                 status=segment.status,
+                attempts=segment.retry_count,
+                runpod_pod_id=segment.runpod_pod_id,
+                prompt_id=segment.prompt_id,
                 audio_start_seconds=segment.audio_start_seconds,
                 audio_end_seconds=segment.audio_end_seconds,
                 duration_seconds=segment.duration_seconds,
