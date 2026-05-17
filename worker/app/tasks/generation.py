@@ -182,7 +182,7 @@ def _run_mock_generation(job_id: UUID) -> dict[str, str]:
             job.output_file_id = result_file.id
             job.status = JobStatus.COMPLETED.value
             job.completed_at = datetime.now(UTC)
-            job.next_retry_at = None
+            _clear_waiting_fields(job)
             job.mock_result_message = "Mock generation completed successfully"
             job.error_message = None
             notification = GenerationNotification(
@@ -527,10 +527,8 @@ def _retry_waiting_generation_jobs(
                 select(GenerationJob)
                 .where(
                     GenerationJob.status.in_(waiting_statuses),
-                    (
-                        (GenerationJob.next_retry_at.is_(None))
-                        | (GenerationJob.next_retry_at <= now)
-                    ),
+                    GenerationJob.next_retry_at.is_not(None),
+                    GenerationJob.next_retry_at <= now,
                 )
                 .order_by(
                     GenerationJob.next_retry_at.asc().nullsfirst(),
@@ -1035,7 +1033,7 @@ def _complete_comfyui_job(
             job.output_file_id = result_file.id
             job.status = JobStatus.COMPLETED.value
             job.completed_at = now
-            job.next_retry_at = None
+            _clear_waiting_fields(job)
             job.mock_result_message = "ComfyUI generation completed successfully"
             job.error_message = None
             for segment in job.segments:
@@ -1096,7 +1094,7 @@ def _mark_job_failed(job_id: UUID, error_message: str) -> GenerationNotification
             else:
                 job.error_message = error_message
             job.completed_at = datetime.now(UTC)
-            job.next_retry_at = None
+            _clear_waiting_fields(job)
 
             result = session.execute(
                 select(GenerationSegment).where(GenerationSegment.job_id == job.id)
@@ -1121,6 +1119,12 @@ def _mark_job_failed(job_id: UUID, error_message: str) -> GenerationNotification
                 error_message=job.error_message,
                 funds_returned=funds_returned,
             )
+
+
+def _clear_waiting_fields(job: GenerationJob) -> None:
+    job.next_retry_at = None
+    job.waiting_for_gpu_since = None
+    job.waiting_for_pod_since = None
 
 
 def _notify_generation_completed(notification: GenerationNotification | None) -> None:

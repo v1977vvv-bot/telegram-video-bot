@@ -726,6 +726,9 @@ ComfyUI troubleshooting:
 - Pool-full jobs use status `waiting_for_pod`. They mean the configured pod pool is
   busy or at `RUNPOD_MAX_ACTIVE_PODS`, not that RunPod capacity is unavailable.
   Retry both waiting states with `POST /api/v1/debug/generation/retry-waiting`.
+- Terminal jobs (`completed`, `failed`, `cancelled`) clear `next_retry_at`,
+  `waiting_for_gpu_since`, and `waiting_for_pod_since` so stale queue state does not
+  appear in debug job lists.
 - Debug `POST /api/v1/debug/runpod/create-pod` also tries GPU types in
   `RUNPOD_ALLOWED_GPU_TYPES` order, applies the same create retry and RAM fallback
   policy, and returns `phase`, `min_ram_gb`, and `tried_gpu_types` for capacity

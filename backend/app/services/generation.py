@@ -249,6 +249,9 @@ class GenerationService:
             now = datetime.now(UTC)
             job.status = JobStatus.CANCELLED.value
             job.cancelled_at = now
+            job.next_retry_at = None
+            job.waiting_for_gpu_since = None
+            job.waiting_for_pod_since = None
             for segment in job.segments:
                 segment.status = SegmentStatus.CANCELLED.value
 

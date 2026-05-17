@@ -737,7 +737,8 @@ async def _retry_debug_waiting_jobs(
             select(GenerationJob)
             .where(
                 GenerationJob.status.in_(statuses),
-                or_(GenerationJob.next_retry_at.is_(None), GenerationJob.next_retry_at <= now),
+                GenerationJob.next_retry_at.is_not(None),
+                GenerationJob.next_retry_at <= now,
             )
             .order_by(
                 GenerationJob.next_retry_at.asc().nullsfirst(), GenerationJob.created_at.asc()
@@ -1064,6 +1065,7 @@ async def _fail_generation_job_with_refund(
 
         old_status = job.status
         if old_status == JobStatus.COMPLETED.value:
+            _clear_generation_waiting_fields(job)
             return {
                 "job_id": job.id,
                 "old_status": old_status,
@@ -1081,6 +1083,12 @@ async def _fail_generation_job_with_refund(
             + totals.get(BalanceTransactionType.RELEASE.value, Decimal("0.0000"))
         )
         if captured > Decimal("0"):
+            if old_status in {
+                JobStatus.COMPLETED.value,
+                JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
+            }:
+                _clear_generation_waiting_fields(job)
             return {
                 "job_id": job.id,
                 "old_status": old_status,
@@ -1091,6 +1099,12 @@ async def _fail_generation_job_with_refund(
             }
 
         if old_status not in FAIL_REFUND_ALLOWED_JOB_STATUSES:
+            if old_status in {
+                JobStatus.COMPLETED.value,
+                JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
+            }:
+                _clear_generation_waiting_fields(job)
             return {
                 "job_id": job.id,
                 "old_status": old_status,
@@ -1125,6 +1139,7 @@ async def _fail_generation_job_with_refund(
             f"{error_message}; refund failed: {refund_error}" if refund_error else error_message
         )
         job.completed_at = now
+        _clear_generation_waiting_fields(job)
 
         segments_result = await session.execute(
             select(GenerationSegment).where(GenerationSegment.job_id == job.id)
@@ -1167,6 +1182,12 @@ async def _fail_generation_job_with_refund(
 
     response["notification_sent"] = notification_sent
     return response
+
+
+def _clear_generation_waiting_fields(job: GenerationJob) -> None:
+    job.next_retry_at = None
+    job.waiting_for_gpu_since = None
+    job.waiting_for_pod_since = None
 
 
 async def _get_job_transaction_totals(
