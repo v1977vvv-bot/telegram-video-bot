@@ -1,0 +1,134 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - path: .env.production
+        required: false
+    command:
+      - sh
+      - -c
+      - >
+        python scripts/wait_for_db.py &&
+        uvicorn backend.app.main:app --host $${BACKEND_HOST:-0.0.0.0}
+        --port $${BACKEND_PORT:-8000}
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_BIND_ADDRESS:-127.0.0.1}:${BACKEND_PORT:-8000}:${BACKEND_PORT:-8000}"
+    volumes:
+      - app_storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:$${BACKEND_PORT:-8000}/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    env_file:
+      - path: .env.production
+        required: false
+    command:
+      - sh
+      - -c
+      - python scripts/wait_for_db.py && python -m bot.app.main
+    restart: unless-stopped
+    volumes:
+      - app_storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    env_file:
+      - path: .env.production
+        required: false
+    command:
+      - sh
+      - -c
+      - >
+        python scripts/wait_for_db.py &&
+        celery -A worker.app.main.celery_app worker --loglevel=$${LOG_LEVEL:-INFO}
+        --concurrency=$${CELERY_WORKER_CONCURRENCY:-1}
+    restart: unless-stopped
+    volumes:
+      - app_storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    profiles:
+      - proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-YOUR_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+      BACKEND_PORT: ${BACKEND_PORT:-8000}
+    volumes:
+      - ./deploy/Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  app_storage:
+  caddy_data:
+  caddy_config:

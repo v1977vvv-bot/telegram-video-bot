@@ -739,11 +739,119 @@ docker compose exec backend alembic upgrade head
 docker compose exec worker celery -A worker.app.main.celery_app inspect registered
 ```
 
-## MVP Launch Checklist
+## Production Deployment
+
+Production files:
+
+- `.env.production.example` - complete production template without real secrets.
+- `docker-compose.prod.yml` - production compose for backend, bot, worker, PostgreSQL,
+  Redis, and optional Caddy.
+- `deploy/Caddyfile.example` - HTTPS reverse proxy example.
+- `scripts/deploy_prod.sh` - build/start/migrate/healthcheck helper.
+- `scripts/backup_postgres.sh` and `scripts/restore_postgres.sh` - simple database
+  backup and restore helpers.
+
+Create production env:
+
+```bash
+cp .env.production.example .env.production
+```
+
+Fill every `change_me` value in `.env.production`. Do not commit `.env.production`.
+
+Start production services:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+```
+
+Validate compose syntax without starting production services:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.production.example config
+```
+
+Run migrations:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.production exec backend \
+  alembic upgrade head
+```
+
+Logs:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.production logs -f backend bot worker
+```
+
+Health:
+
+```bash
+curl https://YOUR_DOMAIN/api/v1/health
+curl https://YOUR_DOMAIN/api/v1/ops/status
+```
+
+The production compose does not expose PostgreSQL or Redis ports. Backend is bound to
+`127.0.0.1:${BACKEND_PORT:-8000}` by default; put a reverse proxy in front of it or
+enable the optional Caddy profile.
+
+Optional Caddy HTTPS:
+
+```bash
+DOMAIN=YOUR_DOMAIN ACME_EMAIL=admin@example.com \
+docker compose -f docker-compose.prod.yml --env-file .env.production --profile proxy up -d --build
+```
+
+Point the domain DNS A/AAAA records to the server before starting Caddy. The MVP bot
+uses Telegram polling, so no Telegram webhook migration is required for Stage 10.
+Configure Cryptomus callback URL in the merchant dashboard as:
+
+```text
+https://YOUR_DOMAIN/api/v1/payments/cryptomus/webhook
+```
+
+If your deployed payment route differs, use the actual backend route from the payment
+module.
+
+Local-only debug access in production:
+
+- Default production setting is `DEBUG_ENDPOINTS_ENABLED=false`.
+- For emergency access, SSH to the server and call local endpoints from the server, or
+  temporarily set `DEBUG_ENDPOINTS_ENABLED=true` with `DEBUG_ENDPOINTS_LOCAL_ONLY=true`.
+- Disable debug endpoints again immediately after the emergency action.
+- Never expose destructive debug endpoints through a public reverse proxy.
+
+Backups:
+
+```bash
+scripts/backup_postgres.sh
+scripts/restore_postgres.sh backups/postgres_YYYYMMDDTHHMMSSZ.dump --yes
+```
+
+`restore_postgres.sh` asks for confirmation unless `--yes` is passed.
+
+First production smoke test:
+
+1. Deploy and run migrations.
+2. Check `GET /api/v1/health` and `GET /api/v1/ops/status`.
+3. Confirm the Telegram bot responds.
+4. Check user balance display.
+5. Create a Cryptomus invoice with the smallest package/current payment flow.
+6. Confirm the payment callback updates balance.
+7. Run one short generation.
+8. Confirm final video delivery and the R2 download button.
+9. Confirm balance capture happened and frozen balance returned to zero.
+10. Confirm the RunPod pod becomes idle and later terminates.
+11. Check local anomalies from the server if debug endpoints are temporarily enabled.
+12. Check backend, bot, and worker logs for tracebacks.
+
+## Production Launch Checklist
 
 Pre-launch environment:
 
+- Create `.env.production` from `.env.production.example`.
 - Set `APP_ENV=production`.
+- Set `DEBUG_ENDPOINTS_ENABLED=false`.
 - Set real `TELEGRAM_BOT_TOKEN`, `CRYPTOMUS_*`, `RUNPOD_API_KEY`,
   `RUNPOD_TEMPLATE_ID`, PostgreSQL, Redis, and `CLOUDFLARE_R2_*` values.
 - Keep `DISTRIBUTED_SEGMENT_GENERATION_ENABLED=false` for MVP launch.
@@ -752,6 +860,14 @@ Pre-launch environment:
 - Keep `RUNPOD_MIN_WARM_PODS=0` unless warm capacity cost is intentional.
 - Keep `RUNPOD_AUTO_TERMINATE=true`, `RUNPOD_KEEPER_ENABLED=true`,
   `RUNPOD_WAITING_GPU_ENABLED=true`, and `RUNPOD_QUEUE_WAIT_ENABLED=true`.
+- Confirm the database and Redis volumes exist and are mounted by production compose.
+- Configure recurring PostgreSQL backups.
+- Confirm DNS points to the server and HTTPS works.
+- Configure the Cryptomus callback URL.
+- Verify RunPod API key/template and Cloudflare R2 access.
+- Run one test payment and one short test generation.
+- Check active RunPod pods after the generation.
+- Know the rollback command before launch.
 - Keep `CELERY_WORKER_CONCURRENCY=1` for MVP unless multi-worker locking has been
   explicitly load-tested.
 - Set `DEBUG_ENDPOINTS_ENABLED=false` in production, or keep
@@ -805,6 +921,11 @@ Emergency controls:
 - Terminate active RunPod pods through the local debug endpoint or RunPod dashboard.
 - Use `fail-refund` for stuck queued/generating/waiting jobs after verifying they did
   not already capture balance.
+- List jobs: `curl http://localhost:8000/api/v1/debug/generation/jobs?limit=50`.
+- Fail/refund a stuck job:
+  `curl -X POST http://localhost:8000/api/v1/debug/generation/jobs/{job_id}/fail-refund`.
+- Roll back code with `git revert <commit>` and rerun production compose.
+- Restore a backup with `scripts/restore_postgres.sh backups/postgres_...dump --yes`.
 
 ## Troubleshooting
 
