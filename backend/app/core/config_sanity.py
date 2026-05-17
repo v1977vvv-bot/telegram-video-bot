@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 from shared.app.config import Settings
 from shared.app.enums import StorageProvider
@@ -76,6 +77,7 @@ def build_config_sanity_result(settings: Settings) -> ConfigSanityResult:
         _require_redis_config(result, settings)
         _require_storage_config(result, settings)
         _require_payment_package_config(result, settings)
+        _require_runpod_cost_config(result, settings)
         _require_production_safety_defaults(result, settings)
     else:
         _warn_if_placeholder(result, "TELEGRAM_BOT_TOKEN", settings.telegram_bot_token)
@@ -83,6 +85,7 @@ def build_config_sanity_result(settings: Settings) -> ConfigSanityResult:
         _warn_if_placeholder(result, "RUNPOD_TEMPLATE_ID", settings.runpod_template_id)
         _warn_if_storage_incomplete(result, settings)
         _warn_if_payment_package_config_invalid(result, settings)
+        _warn_if_runpod_cost_config_invalid(result, settings)
 
     _warn_for_launch_risky_values(result, settings)
     return result
@@ -172,6 +175,12 @@ def _require_payment_package_config(result: ConfigSanityResult, settings: Settin
         result.errors.append("PAYMENT_USD_USDT_RATE must be 1 for MVP launch")
 
 
+def _require_runpod_cost_config(result: ConfigSanityResult, settings: Settings) -> None:
+    errors = _runpod_cost_config_errors(settings)
+    for error in errors:
+        result.errors.append(error)
+
+
 def _warn_if_payment_package_config_invalid(
     result: ConfigSanityResult,
     settings: Settings,
@@ -180,6 +189,30 @@ def _warn_if_payment_package_config_invalid(
         _ = settings.payment_package_amounts_usd
     except (ArithmeticError, ValueError) as exc:
         result.warnings.append(f"PAYMENT_PACKAGES_USD is invalid: {exc}")
+
+
+def _warn_if_runpod_cost_config_invalid(
+    result: ConfigSanityResult,
+    settings: Settings,
+) -> None:
+    for error in _runpod_cost_config_errors(settings):
+        result.warnings.append(error)
+
+
+def _runpod_cost_config_errors(settings: Settings) -> list[str]:
+    if not settings.runpod_cost_tracking_enabled:
+        return []
+
+    errors: list[str] = []
+    if settings.runpod_default_hourly_cost_usd <= Decimal("0"):
+        errors.append("RUNPOD_DEFAULT_HOURLY_COST_USD must be positive")
+    try:
+        _ = settings.runpod_gpu_hourly_costs_map
+    except (ArithmeticError, ValueError) as exc:
+        errors.append(f"RUNPOD_GPU_HOURLY_COSTS_USD is invalid: {exc}")
+    if settings.runpod_cost_min_billing_seconds < 0:
+        errors.append("RUNPOD_COST_MIN_BILLING_SECONDS must be >= 0")
+    return errors
 
 
 def _warn_for_launch_risky_values(result: ConfigSanityResult, settings: Settings) -> None:
@@ -197,6 +230,10 @@ def _warn_for_launch_risky_values(result: ConfigSanityResult, settings: Settings
         )
     if settings.distributed_segment_generation_enabled:
         result.warnings.append("Experimental distributed segment generation is enabled")
+    if settings.runpod_cost_rounding_mode.strip().lower() != "up_to_second":
+        result.warnings.append(
+            "RUNPOD_COST_ROUNDING_MODE is unknown; cost tracking falls back to up_to_second"
+        )
 
 
 def _warn_if_storage_incomplete(result: ConfigSanityResult, settings: Settings) -> None:

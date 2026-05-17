@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 
 from pydantic import Field, computed_field
@@ -105,6 +105,15 @@ class Settings(BaseSettings):
     runpod_short_job_max_duration_seconds: int = 90
     runpod_create_max_attempts: int = 3
     runpod_create_retry_sleep_seconds: int = 20
+    runpod_cost_tracking_enabled: bool = True
+    runpod_default_hourly_cost_usd: Decimal = Field(default=Decimal("0.80"))
+    runpod_gpu_hourly_costs_usd: str = (
+        "NVIDIA GeForce RTX 5090:0.80,NVIDIA L40S:0.75,NVIDIA GeForce RTX 4090:0.55"
+    )
+    runpod_cost_include_cold_start: bool = True
+    runpod_cost_include_idle_time: bool = False
+    runpod_cost_min_billing_seconds: int = 60
+    runpod_cost_rounding_mode: str = "up_to_second"
     runpod_waiting_gpu_enabled: bool = True
     runpod_waiting_gpu_retry_seconds: int = 120
     runpod_waiting_gpu_max_wait_minutes: int = 30
@@ -223,6 +232,33 @@ class Settings(BaseSettings):
             and self.runpod_fallback_min_ram_gb > 0
             and self.runpod_fallback_min_ram_gb < self.runpod_min_ram_gb
         )
+
+    @property
+    def runpod_gpu_hourly_costs_map(self) -> dict[str, Decimal]:
+        costs: dict[str, Decimal] = {}
+        raw_map = self.runpod_gpu_hourly_costs_usd.strip()
+        if not raw_map:
+            return costs
+
+        for raw_entry in raw_map.split(","):
+            raw_entry = raw_entry.strip()
+            if not raw_entry:
+                continue
+            if ":" not in raw_entry:
+                raise ValueError("GPU hourly cost entries must use 'GPU name:cost' format")
+            gpu_type, raw_cost = raw_entry.rsplit(":", maxsplit=1)
+            gpu_type = gpu_type.strip()
+            if not gpu_type:
+                raise ValueError("GPU hourly cost GPU name cannot be empty")
+            try:
+                cost = Decimal(raw_cost.strip())
+            except InvalidOperation as exc:
+                raise ValueError(f"Invalid hourly cost for GPU type {gpu_type}") from exc
+            if cost <= Decimal("0"):
+                raise ValueError(f"Hourly cost for GPU type {gpu_type} must be positive")
+            costs[gpu_type] = cost
+
+        return costs
 
     @property
     def payment_package_amounts_usd(self) -> list[Decimal]:

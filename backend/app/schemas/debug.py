@@ -180,6 +180,8 @@ class DebugRunPodPodResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     terminated_at: datetime | None
+    estimated_runtime_seconds: int | None = None
+    estimated_cost_usd: Decimal | None = None
 
 
 class DebugRunPodPodsResponse(BaseModel):
@@ -268,6 +270,8 @@ class DebugGenerationJobListItemResponse(BaseModel):
     updated_at: datetime
     price_usd: Decimal | None
     cost_usd: Decimal | None
+    gross_margin_usd: Decimal | None
+    gross_margin_percent: Decimal | None
     waiting_for_gpu_since: datetime | None
     waiting_for_pod_since: datetime | None
     next_retry_at: datetime | None

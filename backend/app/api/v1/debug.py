@@ -82,6 +82,7 @@ from shared.app.exceptions import AppError
 from worker.app.services.audio import AudioService as WorkerAudioService
 from worker.app.services.runpod import RunPodCapacityError, RunPodClient, RunPodError
 from worker.app.services.runpod_autoscaler import RunPodAutoscaler
+from worker.app.services.runpod_costs import RunPodCostService, calculate_gross_margin
 from worker.app.services.runpod_keeper import RunPodKeeper
 from worker.app.services.workflow_patcher import (
     WorkflowPatchError,
@@ -715,6 +716,10 @@ async def list_debug_generation_jobs(
     for job in jobs:
         ledger = ledger_flags.get(job.id, {})
         pod = runpod_map.get(job.id)
+        gross_margin_usd, gross_margin_percent = calculate_gross_margin(
+            price_usd=job.price_usd,
+            cost_usd=job.cost_usd,
+        )
         items.append(
             DebugGenerationJobListItemResponse(
                 id=job.id,
@@ -723,6 +728,8 @@ async def list_debug_generation_jobs(
                 updated_at=job.updated_at,
                 price_usd=job.price_usd,
                 cost_usd=job.cost_usd,
+                gross_margin_usd=gross_margin_usd,
+                gross_margin_percent=gross_margin_percent,
                 waiting_for_gpu_since=job.waiting_for_gpu_since,
                 waiting_for_pod_since=job.waiting_for_pod_since,
                 next_retry_at=job.next_retry_at,
@@ -1413,6 +1420,7 @@ def _terminate_runpod_pod(settings, runpod_pod_id: str) -> None:
 
 
 def _runpod_pod_response(pod: RunpodPod) -> DebugRunPodPodResponse:
+    estimated_runtime_seconds, estimated_cost_usd = _estimate_runpod_pod_cost(pod)
     return DebugRunPodPodResponse(
         id=pod.id,
         runpod_pod_id=pod.runpod_pod_id,
@@ -1431,7 +1439,28 @@ def _runpod_pod_response(pod: RunpodPod) -> DebugRunPodPodResponse:
         created_at=pod.created_at,
         updated_at=pod.updated_at,
         terminated_at=pod.terminated_at,
+        estimated_runtime_seconds=estimated_runtime_seconds,
+        estimated_cost_usd=estimated_cost_usd,
     )
+
+
+def _estimate_runpod_pod_cost(pod: RunpodPod) -> tuple[int | None, Decimal | None]:
+    settings = get_settings()
+    if not settings.runpod_cost_tracking_enabled:
+        return None, None
+    try:
+        cost_service = RunPodCostService(settings)
+        ended_at = pod.terminated_at or datetime.now(UTC)
+        runtime_seconds = cost_service.runtime_seconds(started_at=pod.created_at, ended_at=ended_at)
+        cost_usd = cost_service.calculate_runpod_cost_usd(
+            gpu_type=pod.gpu_type,
+            started_at=pod.created_at,
+            ended_at=ended_at,
+            min_billing_seconds=settings.runpod_cost_min_billing_seconds,
+        )
+        return runtime_seconds, cost_usd
+    except Exception:
+        return None, None
 
 
 def _job_anomaly_item(job: GenerationJob) -> dict[str, Any]:

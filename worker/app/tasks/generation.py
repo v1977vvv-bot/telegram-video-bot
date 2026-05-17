@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from backend.app.models.generation_job import GenerationJob
 from backend.app.models.generation_segment import GenerationSegment
+from backend.app.models.runpod_pod import RunpodPod
 from shared.app.config import Settings, get_settings
 from shared.app.enums import (
     AudioSegmentationStrategy,
@@ -30,6 +31,7 @@ from worker.app.services.balance import SyncBalanceService
 from worker.app.services.comfyui_client import ComfyUIClient
 from worker.app.services.distributed_generation import DistributedSegmentGenerationService
 from worker.app.services.runpod import NoGpuAvailableError, RunPodPoolFullError
+from worker.app.services.runpod_costs import RunPodCostService
 from worker.app.services.runpod_manager import ManagedComfyUIEndpoint, RunPodManager
 from worker.app.services.storage import WorkerStorageService
 from worker.app.services.telegram_notify import GenerationNotification, TelegramNotifyService
@@ -213,6 +215,7 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
     success = False
     endpoint: ManagedComfyUIEndpoint | None = None
     client: ComfyUIClient | None = None
+    cost_started_at: datetime | None = None
     runpod_manager = RunPodManager(settings)
     try:
         with get_worker_session() as session:
@@ -282,6 +285,7 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
             )
             return {"status": "completed", "job_id": str(job_id)}
 
+        cost_started_at = datetime.now(UTC) if settings.runpod_cost_include_cold_start else None
         endpoint_result = _acquire_single_comfyui_endpoint_or_wait(
             job_id=job_id,
             settings=settings,
@@ -290,6 +294,8 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
         if isinstance(endpoint_result, dict):
             return endpoint_result
         endpoint = endpoint_result
+        if cost_started_at is None:
+            cost_started_at = datetime.now(UTC)
         client = ComfyUIClient(settings, base_url=endpoint.base_url)
         client.healthcheck()
 
@@ -353,6 +359,13 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
         )
 
         notification = _complete_comfyui_job(job_id, context, final_path)
+        _record_runpod_job_cost(
+            job_id=job_id,
+            endpoint=endpoint,
+            started_at=cost_started_at,
+            ended_at=datetime.now(UTC),
+            settings=settings,
+        )
         _notify_generation_completed(notification)
         _mark_runpod_endpoint_idle(runpod_manager, endpoint)
         success = True
@@ -363,6 +376,14 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
         )
         return {"status": "completed", "job_id": str(job_id)}
     except Exception:
+        if endpoint is not None and cost_started_at is not None:
+            _record_runpod_job_cost(
+                job_id=job_id,
+                endpoint=endpoint,
+                started_at=cost_started_at,
+                ended_at=datetime.now(UTC),
+                settings=settings,
+            )
         if endpoint is not None:
             _release_runpod_endpoint_after_failure(runpod_manager, endpoint)
         raise
@@ -395,6 +416,58 @@ def _release_runpod_endpoint_after_failure(
             manager.release_after_failure(session, endpoint)
     except Exception:
         logger.warning("RunPod pod failure release failed pod_id=%s", endpoint.runpod_pod_id)
+
+
+def _record_runpod_job_cost(
+    *,
+    job_id: UUID,
+    endpoint: ManagedComfyUIEndpoint | None,
+    started_at: datetime | None,
+    ended_at: datetime,
+    settings: Settings,
+) -> None:
+    if not settings.runpod_cost_tracking_enabled:
+        return
+    if endpoint is None or not endpoint.managed or started_at is None:
+        logger.info(
+            "RunPod estimated job cost skipped job_id=%s reason=no_managed_endpoint",
+            job_id,
+        )
+        return
+
+    try:
+        with get_worker_session() as session:
+            with session.begin():
+                job = session.get(GenerationJob, job_id, with_for_update=True)
+                if job is None:
+                    return
+                gpu_type: str | None = None
+                if endpoint.db_pod_id is not None:
+                    pod = session.get(RunpodPod, endpoint.db_pod_id)
+                    if pod is not None:
+                        gpu_type = pod.gpu_type
+                cost_service = RunPodCostService(settings)
+                cost_usd = cost_service.calculate_runpod_cost_usd(
+                    gpu_type=gpu_type,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    min_billing_seconds=settings.runpod_cost_min_billing_seconds,
+                )
+                runtime_seconds = cost_service.runtime_seconds(
+                    started_at=started_at,
+                    ended_at=ended_at,
+                )
+                job.cost_usd = cost_usd
+                logger.info(
+                    "RunPod estimated job cost job_id=%s gpu_type=%s runtime_seconds=%s "
+                    "cost_usd=%s",
+                    job_id,
+                    gpu_type,
+                    runtime_seconds,
+                    cost_usd,
+                )
+    except Exception:
+        logger.warning("RunPod estimated job cost failed job_id=%s", job_id, exc_info=True)
 
 
 def _acquire_single_comfyui_endpoint_or_wait(

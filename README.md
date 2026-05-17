@@ -265,6 +265,13 @@ RUNPOD_SHORT_JOB_COLD_START_AVOIDANCE_ENABLED=true
 RUNPOD_SHORT_JOB_MAX_DURATION_SECONDS=90
 RUNPOD_CREATE_MAX_ATTEMPTS=3
 RUNPOD_CREATE_RETRY_SLEEP_SECONDS=20
+RUNPOD_COST_TRACKING_ENABLED=true
+RUNPOD_DEFAULT_HOURLY_COST_USD=0.80
+RUNPOD_GPU_HOURLY_COSTS_USD=NVIDIA GeForce RTX 5090:0.80,NVIDIA L40S:0.75,NVIDIA GeForce RTX 4090:0.55
+RUNPOD_COST_INCLUDE_COLD_START=true
+RUNPOD_COST_INCLUDE_IDLE_TIME=false
+RUNPOD_COST_MIN_BILLING_SECONDS=60
+RUNPOD_COST_ROUNDING_MODE=up_to_second
 RUNPOD_WAITING_GPU_ENABLED=true
 RUNPOD_WAITING_GPU_RETRY_SECONDS=120
 RUNPOD_WAITING_GPU_MAX_WAIT_MINUTES=30
@@ -382,6 +389,47 @@ There is no Celery beat scheduler in the MVP compose setup. In production, sched
 Celery task `runpod_keeper_tick` every `RUNPOD_KEEPER_INTERVAL_SECONDS` seconds with
 cron, Cloud Scheduler, or Celery beat. The HTTP endpoint is local/debug-only and is meant
 for manual checks, not as the production scheduler surface.
+
+## RunPod cost tracking
+
+Stage 10.2 estimates infrastructure cost per generation job without calling the RunPod
+billing API. User billing is unchanged: `generation_jobs.price_usd` remains captured
+user revenue, and `generation_jobs.cost_usd` is only estimated infrastructure cost for
+later finance/admin reporting.
+
+Formula:
+
+```text
+cost_usd = hourly_gpu_price_usd * billable_seconds / 3600
+```
+
+`billable_seconds` is rounded up to the next second and is at least
+`RUNPOD_COST_MIN_BILLING_SECONDS`. GPU hourly prices come from
+`RUNPOD_GPU_HOURLY_COSTS_USD`; unknown GPU types use
+`RUNPOD_DEFAULT_HOURLY_COST_USD`. With `RUNPOD_COST_INCLUDE_COLD_START=true`, the job
+cost interval starts before endpoint acquisition, so a job that creates a cold pod
+includes ComfyUI readiness time. `RUNPOD_COST_INCLUDE_IDLE_TIME=false` means warm/idle
+pod cost is not allocated per job in this MVP.
+
+Examples:
+
+- `1200` seconds at `$0.80/h` -> `$0.2667`.
+- `30` seconds at `$0.80/h` with `RUNPOD_COST_MIN_BILLING_SECONDS=60` -> `$0.0133`.
+- A one-minute user video with user price around `$0.7200` and about `20` GPU minutes
+  at `$0.80/h` has estimated cost `$0.2667` and gross margin around `$0.4533`.
+
+Debug and ops visibility:
+
+```bash
+curl http://localhost:8000/api/v1/debug/generation/jobs?limit=20
+curl http://localhost:8000/api/v1/debug/runpod/pods
+curl http://localhost:8000/api/v1/ops/status
+```
+
+The debug jobs response includes `price_usd`, `cost_usd`, `gross_margin_usd`, and
+`gross_margin_percent` when cost is available. The RunPod pod debug response includes
+informational estimated runtime/cost for the pod record. These values are estimates;
+actual RunPod billing API reconciliation can be added later.
 
 ## Stage 7.1 - RunPod bootstrap script
 

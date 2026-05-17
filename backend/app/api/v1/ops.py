@@ -15,6 +15,7 @@ from backend.app.services.payment_packages import PaymentPackageService
 from shared.app.config import get_settings
 from shared.app.database import get_session
 from shared.app.enums import JobStatus
+from worker.app.services.runpod_costs import RunPodCostService
 
 router = APIRouter(prefix="/ops", tags=["ops"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -54,6 +55,7 @@ async def get_ops_status(session: SessionDep, response: Response) -> OpsStatusRe
         worker_queue="not_checked",
         jobs=jobs,
         runpod_pods=runpod_pods,
+        runpod_costs=_runpod_cost_ops_status(settings),
         payments=_payment_ops_status(settings),
     )
 
@@ -103,4 +105,18 @@ def _payment_ops_status(settings) -> dict[str, object]:
         "custom_amount_enabled": settings.payment_custom_amount_enabled,
         "display_currency": settings.payment_display_currency,
         "provider_currency": settings.payment_provider_currency,
+    }
+
+
+def _runpod_cost_ops_status(settings) -> dict[str, object]:
+    try:
+        known_gpu_cost_count = len(RunPodCostService(settings).parse_gpu_hourly_costs())
+    except Exception:
+        known_gpu_cost_count = 0
+    return {
+        "tracking_enabled": settings.runpod_cost_tracking_enabled,
+        "default_hourly_cost_usd": str(settings.runpod_default_hourly_cost_usd),
+        "known_gpu_cost_count": known_gpu_cost_count,
+        "include_cold_start": settings.runpod_cost_include_cold_start,
+        "include_idle_time": settings.runpod_cost_include_idle_time,
     }
