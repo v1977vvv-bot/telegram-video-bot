@@ -221,8 +221,13 @@ class DebugRunPodAutoscalingPlanResponse(BaseModel):
     pending_gpu_minutes: Decimal
     target_queue_wait_minutes: int
     active_pods: int
+    active_capacity_pods: int
+    assignable_pods: int
+    starting_pods: int
+    creating_pods: int
     busy_pods: int
     idle_pods: int
+    estimated_cold_start_seconds: int
     max_active_pods: int
     min_warm_pods: int
     estimated_pod_hourly_cost_usd: Decimal

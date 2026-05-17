@@ -216,6 +216,9 @@ RUNPOD_MAX_ESTIMATED_GPU_MINUTES_PER_TICK=240
 RUNPOD_MAX_ESTIMATED_HOURLY_GPU_COST_USD=3.00
 RUNPOD_ESTIMATED_POD_HOURLY_COST_USD=0.80
 RUNPOD_DEFAULT_JOB_DURATION_SECONDS=60
+RUNPOD_ESTIMATED_COLD_START_SECONDS=720
+RUNPOD_SHORT_JOB_COLD_START_AVOIDANCE_ENABLED=true
+RUNPOD_SHORT_JOB_MAX_DURATION_SECONDS=90
 RUNPOD_CREATE_MAX_ATTEMPTS=3
 RUNPOD_CREATE_RETRY_SLEEP_SECONDS=20
 RUNPOD_WAITING_GPU_ENABLED=true
@@ -301,6 +304,12 @@ How it works:
   full audio. The stable single-pod path remains the fallback. MVP distributed mode uses
   `DISTRIBUTED_SEGMENT_IMAGE_STRATEGY=source_image`, so each segment starts from the
   original uploaded image rather than the previous segment's last frame.
+- Stage 8.4.1 makes scheduling cold-start-aware. `RUNPOD_ESTIMATED_COLD_START_SECONDS`
+  is the assumed pod startup cost. Short jobs up to
+  `RUNPOD_SHORT_JOB_MAX_DURATION_SECONDS` prefer waiting for existing busy or
+  starting/creating capacity instead of creating a cold pod. Starting/creating pods
+  count toward `RUNPOD_MAX_ACTIVE_PODS`, but they are not assignable until ComfyUI
+  `/system_stats` is healthy and the pod is idle/ready.
 
 Example fallback logs:
 
@@ -793,6 +802,8 @@ ComfyUI troubleshooting:
 - Debug per-segment assignment with
   `GET /api/v1/debug/generation/jobs/{job_id}/segments`; it includes attempts,
   `runpod_pod_id`, and `prompt_id` when distributed mode runs.
+- In autoscaling/debug responses, `active_capacity_pods` includes creating/starting
+  pods. `assignable_pods` means healthy idle/ready pods only.
 - `No mp4 output found in ComfyUI history`: check that the workflow's
   `VHS_VideoCombine` node writes an `.mp4` and that node `317` is present.
 - `LoadAudio did not receive file`: check `COMFYUI_INPUT_SUBFOLDER`, the node `125`

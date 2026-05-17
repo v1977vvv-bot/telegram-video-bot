@@ -4,12 +4,14 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.models.generation_job import GenerationJob
 from backend.app.models.runpod_pod import RunpodPod
 from shared.app.config import Settings, get_settings
 from shared.app.enums import PodStatus
@@ -58,19 +60,21 @@ class RunPodManager:
                 managed=False,
             )
 
-        existing_pods = self._get_reusable_existing_pods(session)
+        existing_pods = self._get_assignable_existing_pods(session)
         session.commit()
+        assignable_count = 0
         for existing in existing_pods:
             if existing.base_url is None:
                 continue
             logger.info(
-                "RunPod checking existing pod pod_id=%s status=%s",
+                "RunPod checking assignable pod pod_id=%s status=%s",
                 existing.runpod_pod_id,
                 existing.status,
             )
             if self._healthcheck(existing.base_url):
+                assignable_count += 1
                 logger.info(
-                    "RunPod existing pod healthcheck ok pod_id=%s previous_status=%s",
+                    "RunPod assignable pod found pod_id=%s previous_status=%s",
                     existing.runpod_pod_id,
                     existing.status,
                 )
@@ -93,13 +97,22 @@ class RunPodManager:
                 )
 
         active_count = self._count_active_pods(session)
+        cold_or_busy_count = self._count_busy_or_cold_pods(session)
         session.commit()
         max_active_pods = max(self._settings.runpod_max_active_pods, 1)
         logger.info(
-            "RunPod active pod count active_count=%s max_active_pods=%s",
+            "RunPod active capacity count active_count=%s assignable_count=%s "
+            "max_active_pods=%s",
             active_count,
+            assignable_count,
             max_active_pods,
         )
+        if cold_or_busy_count > 0:
+            logger.info(
+                "RunPod starting/creating pods are active capacity but not assignable "
+                "cold_or_busy_count=%s",
+                cold_or_busy_count,
+            )
         if active_count >= max_active_pods:
             logger.info(
                 "RunPod pool full, job waiting active_count=%s max_active_pods=%s",
@@ -107,6 +120,9 @@ class RunPodManager:
                 max_active_pods,
             )
             raise RunPodPoolFullError("All GPU pods are busy. Job will wait.")
+
+        if self._should_wait_instead_of_cold_start(session, job_id, cold_or_busy_count):
+            raise RunPodPoolFullError("short_job_wait_existing_capacity")
 
         logger.info(
             "RunPod creating additional pod active_count=%s max_active_pods=%s",
@@ -208,14 +224,12 @@ class RunPodManager:
                 logger.info("RunPod pod terminated pod_id=%s", refreshed.runpod_pod_id)
         return terminated
 
-    def _get_reusable_existing_pods(self, session: Session) -> list[RunpodPod]:
+    def _get_assignable_existing_pods(self, session: Session) -> list[RunpodPod]:
         statement = (
             select(RunpodPod)
             .where(
                 RunpodPod.status.in_(
                     [
-                        PodStatus.STARTING.value,
-                        PodStatus.CREATING.value,
                         PodStatus.READY.value,
                         PodStatus.IDLE.value,
                     ]
@@ -229,6 +243,42 @@ class RunPodManager:
             .order_by(RunpodPod.updated_at.desc())
         )
         return list(session.execute(statement).scalars())
+
+    def _should_wait_instead_of_cold_start(
+        self,
+        session: Session,
+        job_id: UUID | None,
+        cold_or_busy_count: int,
+    ) -> bool:
+        if not self._settings.runpod_short_job_cold_start_avoidance_enabled:
+            return False
+        if cold_or_busy_count <= 0:
+            return False
+
+        duration_seconds = self._estimate_job_duration_seconds(session, job_id)
+        max_short_duration = Decimal(max(self._settings.runpod_short_job_max_duration_seconds, 1))
+        if duration_seconds > max_short_duration:
+            return False
+
+        logger.info(
+            "RunPod short job cold-start avoidance job_id=%s duration=%s " "cold_start_seconds=%s",
+            job_id,
+            duration_seconds,
+            self._settings.runpod_estimated_cold_start_seconds,
+        )
+        return True
+
+    def _estimate_job_duration_seconds(self, session: Session, job_id: UUID | None) -> Decimal:
+        default_duration = Decimal(max(self._settings.runpod_default_job_duration_seconds, 1))
+        if job_id is None:
+            return default_duration
+        duration = session.scalar(
+            select(GenerationJob.audio_duration_seconds).where(GenerationJob.id == job_id)
+        )
+        session.commit()
+        if duration is None:
+            return default_duration
+        return Decimal(duration)
 
     def _create_and_wait_for_pod(self, session: Session, *, job_id: UUID | None) -> RunpodPod:
         last_error: Exception | None = None
@@ -363,6 +413,20 @@ class RunPodManager:
                     PodStatus.STARTING.value,
                     PodStatus.READY.value,
                     PodStatus.IDLE.value,
+                    PodStatus.BUSY.value,
+                ]
+            ),
+            RunpodPod.runpod_pod_id.is_not(None),
+            RunpodPod.terminated_at.is_(None),
+        )
+        return len(list(session.execute(statement).scalars()))
+
+    def _count_busy_or_cold_pods(self, session: Session) -> int:
+        statement = select(RunpodPod).where(
+            RunpodPod.status.in_(
+                [
+                    PodStatus.CREATING.value,
+                    PodStatus.STARTING.value,
                     PodStatus.BUSY.value,
                 ]
             ),

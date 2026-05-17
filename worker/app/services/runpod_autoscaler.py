@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
+import httpx
 from sqlalchemy import func, select
 
 from backend.app.models.generation_job import GenerationJob
@@ -37,8 +38,13 @@ class RunPodAutoscalingDecision:
     pending_gpu_minutes: Decimal
     target_queue_wait_minutes: int
     active_pods: int
+    active_capacity_pods: int
+    assignable_pods: int
+    starting_pods: int
+    creating_pods: int
     busy_pods: int
     idle_pods: int
+    estimated_cold_start_seconds: int
     max_active_pods: int
     min_warm_pods: int
     estimated_pod_hourly_cost_usd: Decimal
@@ -56,8 +62,13 @@ class RunPodAutoscalingDecision:
             "pending_gpu_minutes": str(self.pending_gpu_minutes),
             "target_queue_wait_minutes": self.target_queue_wait_minutes,
             "active_pods": self.active_pods,
+            "active_capacity_pods": self.active_capacity_pods,
+            "assignable_pods": self.assignable_pods,
+            "starting_pods": self.starting_pods,
+            "creating_pods": self.creating_pods,
             "busy_pods": self.busy_pods,
             "idle_pods": self.idle_pods,
+            "estimated_cold_start_seconds": self.estimated_cold_start_seconds,
             "max_active_pods": self.max_active_pods,
             "min_warm_pods": self.min_warm_pods,
             "estimated_pod_hourly_cost_usd": str(self.estimated_pod_hourly_cost_usd),
@@ -80,6 +91,9 @@ class RunPodAutoscaler:
         pending_jobs_count = len(pending_jobs)
         pending_gpu_minutes = self._estimate_pending_gpu_minutes(pending_jobs)
         active_pods = self._count_active_pods()
+        assignable_pods = self._count_assignable_pods()
+        starting_pods = self._count_pods({PodStatus.STARTING.value})
+        creating_pods = self._count_pods({PodStatus.CREATING.value})
         busy_pods = self._count_busy_pods()
         idle_pods = self._count_idle_pods()
         max_active_pods = max(self._settings.runpod_max_active_pods, 1)
@@ -92,6 +106,9 @@ class RunPodAutoscaler:
                 pending_jobs_count=pending_jobs_count,
                 pending_gpu_minutes=pending_gpu_minutes,
                 active_pods=active_pods,
+                assignable_pods=assignable_pods,
+                starting_pods=starting_pods,
+                creating_pods=creating_pods,
                 busy_pods=busy_pods,
                 idle_pods=idle_pods,
                 max_active_pods=max_active_pods,
@@ -156,8 +173,13 @@ class RunPodAutoscaler:
             pending_gpu_minutes=pending_gpu_minutes,
             target_queue_wait_minutes=target_wait,
             active_pods=active_pods,
+            active_capacity_pods=active_pods,
+            assignable_pods=assignable_pods,
+            starting_pods=starting_pods,
+            creating_pods=creating_pods,
             busy_pods=busy_pods,
             idle_pods=idle_pods,
+            estimated_cold_start_seconds=max(self._settings.runpod_estimated_cold_start_seconds, 0),
             max_active_pods=max_active_pods,
             min_warm_pods=min_warm_pods,
             estimated_pod_hourly_cost_usd=self._estimated_pod_hourly_cost(),
@@ -175,6 +197,9 @@ class RunPodAutoscaler:
         pending_jobs_count: int,
         pending_gpu_minutes: Decimal,
         active_pods: int,
+        assignable_pods: int,
+        starting_pods: int,
+        creating_pods: int,
         busy_pods: int,
         idle_pods: int,
         max_active_pods: int,
@@ -200,8 +225,13 @@ class RunPodAutoscaler:
             pending_gpu_minutes=pending_gpu_minutes,
             target_queue_wait_minutes=max(self._settings.runpod_target_queue_wait_minutes, 1),
             active_pods=active_pods,
+            active_capacity_pods=active_pods,
+            assignable_pods=assignable_pods,
+            starting_pods=starting_pods,
+            creating_pods=creating_pods,
             busy_pods=busy_pods,
             idle_pods=idle_pods,
+            estimated_cold_start_seconds=max(self._settings.runpod_estimated_cold_start_seconds, 0),
             max_active_pods=max_active_pods,
             min_warm_pods=min_warm_pods,
             estimated_pod_hourly_cost_usd=self._estimated_pod_hourly_cost(),
@@ -259,6 +289,27 @@ class RunPodAutoscaler:
             )
             session.commit()
             return int(count or 0)
+
+    def _count_assignable_pods(self) -> int:
+        with get_worker_session() as session:
+            result = session.execute(
+                select(RunpodPod).where(
+                    RunpodPod.status.in_([PodStatus.IDLE.value, PodStatus.READY.value]),
+                    RunpodPod.active_job_id.is_(None),
+                    RunpodPod.current_job_id.is_(None),
+                    RunpodPod.base_url.is_not(None),
+                    RunpodPod.runpod_pod_id.is_not(None),
+                    RunpodPod.terminated_at.is_(None),
+                )
+            )
+            pods = list(result.scalars())
+            session.commit()
+
+        count = 0
+        for pod in pods:
+            if pod.base_url and _healthcheck(pod.base_url):
+                count += 1
+        return count
 
     def _count_pods(self, statuses: set[str]) -> int:
         with get_worker_session() as session:
@@ -339,3 +390,17 @@ def _ceil_div_decimal(numerator: Decimal, denominator: Decimal) -> int:
     if numerator <= Decimal("0"):
         return 0
     return int((numerator / denominator).to_integral_value(rounding=ROUND_CEILING))
+
+
+def _healthcheck(base_url: str) -> bool:
+    try:
+        with httpx.Client(
+            base_url=base_url,
+            timeout=httpx.Timeout(5.0, connect=2.0),
+            follow_redirects=True,
+        ) as client:
+            response = client.get("/system_stats")
+            response.raise_for_status()
+        return True
+    except Exception:
+        return False

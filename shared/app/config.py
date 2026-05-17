@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     runpod_max_estimated_hourly_gpu_cost_usd: Decimal = Field(default=Decimal("3.00"))
     runpod_estimated_pod_hourly_cost_usd: Decimal = Field(default=Decimal("0.80"))
     runpod_default_job_duration_seconds: int = 60
+    runpod_estimated_cold_start_seconds: int = 720
+    runpod_short_job_cold_start_avoidance_enabled: bool = True
+    runpod_short_job_max_duration_seconds: int = 90
     runpod_create_max_attempts: int = 3
     runpod_create_retry_sleep_seconds: int = 20
     runpod_waiting_gpu_enabled: bool = True
