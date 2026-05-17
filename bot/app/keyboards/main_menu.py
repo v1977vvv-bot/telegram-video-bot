@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from decimal import Decimal
+
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
 )
+
+from shared.app.config import get_settings
 
 MENU_BUTTONS = (
     "Статистика",
@@ -27,18 +32,31 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
-def top_up_amounts_keyboard() -> InlineKeyboardMarkup:
-    keyboard = [
-        [
-            InlineKeyboardButton(text="$5", callback_data="top_up_stub:5"),
-            InlineKeyboardButton(text="$10", callback_data="top_up_stub:10"),
-        ],
-        [
-            InlineKeyboardButton(text="$20", callback_data="top_up_stub:20"),
-            InlineKeyboardButton(text="$50", callback_data="top_up_stub:50"),
-        ],
+def top_up_amounts_keyboard(
+    packages: Sequence[tuple[str, Decimal]] | None = None,
+) -> InlineKeyboardMarkup:
+    resolved_packages = packages or [
+        (_format_amount_label(amount), amount)
+        for amount in get_settings().payment_package_amounts_usd
     ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    rows: list[list[InlineKeyboardButton]] = []
+    for index in range(0, len(resolved_packages), 2):
+        row = [
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"top_up_package:{amount}",
+            )
+            for label, amount in resolved_packages[index : index + 2]
+        ]
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _format_amount_label(amount: Decimal) -> str:
+    amount = amount.quantize(Decimal("0.01"))
+    if amount == amount.to_integral_value():
+        return f"${int(amount)}"
+    return f"${amount}"
 
 
 def cancel_keyboard() -> ReplyKeyboardMarkup:

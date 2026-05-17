@@ -11,6 +11,7 @@ from backend.app.core.redis import ping_redis
 from backend.app.models.generation_job import GenerationJob
 from backend.app.models.runpod_pod import RunpodPod
 from backend.app.schemas.ops import OpsDependencyStatus, OpsStatusResponse
+from backend.app.services.payment_packages import PaymentPackageService
 from shared.app.config import get_settings
 from shared.app.database import get_session
 from shared.app.enums import JobStatus
@@ -53,6 +54,7 @@ async def get_ops_status(session: SessionDep, response: Response) -> OpsStatusRe
         worker_queue="not_checked",
         jobs=jobs,
         runpod_pods=runpod_pods,
+        payments=_payment_ops_status(settings),
     )
 
 
@@ -87,3 +89,18 @@ async def _count_runpod_pods(session: AsyncSession) -> dict[str, int]:
         if status in {"creating", "starting", "ready", "idle", "busy"}
     )
     return counts
+
+
+def _payment_ops_status(settings) -> dict[str, object]:
+    try:
+        packages = PaymentPackageService(settings).get_payment_packages()
+        package_amounts = [str(package.amount_usd) for package in packages]
+    except Exception:
+        package_amounts = []
+    return {
+        "packages_enabled": settings.payment_packages_enabled,
+        "packages_usd": package_amounts,
+        "custom_amount_enabled": settings.payment_custom_amount_enabled,
+        "display_currency": settings.payment_display_currency,
+        "provider_currency": settings.payment_provider_currency,
+    }

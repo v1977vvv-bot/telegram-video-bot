@@ -11,6 +11,9 @@ photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomu
 - Telegram user upsert endpoint: `POST /api/v1/telegram/users/upsert`.
 - User statistics endpoint: `GET /api/v1/users/by-telegram/{telegram_id}/statistics`.
 - User generation history endpoint: `GET /api/v1/users/by-telegram/{telegram_id}/generations`.
+- Fixed payment package endpoints: `GET /api/v1/payments/packages`,
+  `POST /api/v1/payments/cryptomus/invoices`, and
+  `POST /api/v1/payments/cryptomus/webhook`.
 - Debug endpoint `POST /api/v1/debug/enqueue-ping` that enqueues a Celery task.
 - Local debug balance endpoint: `POST /api/v1/debug/users/{telegram_id}/add-balance`.
 - Local debug batch endpoint: `POST /api/v1/debug/users/{telegram_id}/mock-generation-jobs`.
@@ -103,6 +106,38 @@ If `CLOUDFLARE_R2_ENDPOINT_URL` is empty, the app uses
 `https://{CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com`. The bucket can stay
 private. By default, downloads use presigned URLs; `CLOUDFLARE_R2_PUBLIC_BASE_URL`
 is optional.
+
+## Payment packages
+
+Top-ups are fixed packages only:
+
+- `$10`
+- `$25`
+- `$50`
+- `$100`
+
+Users pay through Cryptomus in USDT. The bot balance is displayed and accounted in USD.
+For the MVP, USD and USDT are treated as `1:1` for package accounting. Custom top-up
+amounts are disabled, bonuses are not applied, and the bot does not show an estimated
+number of generations per package.
+
+Payment settings:
+
+```env
+PAYMENT_PACKAGES_ENABLED=true
+PAYMENT_CUSTOM_AMOUNT_ENABLED=false
+PAYMENT_PACKAGES_USD=10,25,50,100
+PAYMENT_DISPLAY_CURRENCY=USD
+PAYMENT_PROVIDER_CURRENCY=USDT
+PAYMENT_USD_USDT_RATE=1
+PAYMENT_SHOW_ESTIMATED_GENERATIONS=false
+PRICING_MIN_JOB_PRICE_USD=0.30
+```
+
+Generation funds are reserved before generation and captured only after successful
+output upload. Failed generations refund the reserved balance. Business packages or
+direct support top-ups can be handled manually later through admin/manual balance
+adjustment.
 
 ## ComfyUI configuration
 

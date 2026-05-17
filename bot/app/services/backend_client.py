@@ -124,6 +124,25 @@ class GenerationConfirmDto:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class PaymentPackageDto:
+    amount_usd: Decimal
+    display_label: str
+    provider_currency: str
+    provider_amount: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentInvoiceDto:
+    payment_id: UUID
+    amount_usd: Decimal
+    display_currency: str
+    provider_currency: str
+    provider_amount: Decimal
+    payment_url: str
+    status: str
+
+
 class BotBackendClient:
     def __init__(self) -> None:
         settings = get_settings()
@@ -296,6 +315,39 @@ class BotBackendClient:
             status=str(data["status"]),
             price_usd=Decimal(str(data["price_usd"])),
             message=str(data["message"]),
+        )
+
+    async def get_payment_packages(self) -> list[PaymentPackageDto]:
+        data = await self._request("GET", "/api/v1/payments/packages")
+        return [
+            PaymentPackageDto(
+                amount_usd=Decimal(str(item["amount_usd"])),
+                display_label=str(item["display_label"]),
+                provider_currency=str(item["provider_currency"]),
+                provider_amount=Decimal(str(item["provider_amount"])),
+            )
+            for item in data["packages"]
+        ]
+
+    async def create_payment_invoice(
+        self,
+        *,
+        telegram_id: int,
+        amount_usd: Decimal,
+    ) -> PaymentInvoiceDto:
+        data = await self._request(
+            "POST",
+            "/api/v1/payments/cryptomus/invoices",
+            json={"telegram_id": telegram_id, "amount_usd": str(amount_usd)},
+        )
+        return PaymentInvoiceDto(
+            payment_id=UUID(data["payment_id"]),
+            amount_usd=Decimal(str(data["amount_usd"])),
+            display_currency=str(data["display_currency"]),
+            provider_currency=str(data["provider_currency"]),
+            provider_amount=Decimal(str(data["provider_amount"])),
+            payment_url=str(data["payment_url"]),
+            status=str(data["status"]),
         )
 
     async def debug_add_balance(

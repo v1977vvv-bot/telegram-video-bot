@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     cryptomus_api_key: str = "change_me"
     cryptomus_webhook_secret: str = "change_me"
 
+    payment_packages_enabled: bool = True
+    payment_custom_amount_enabled: bool = False
+    payment_packages_usd: str = "10,25,50,100"
+    payment_display_currency: str = "USD"
+    payment_provider_currency: str = "USDT"
+    payment_usd_usdt_rate: Decimal = Field(default=Decimal("1"))
+    payment_show_estimated_generations: bool = False
+
     runpod_api_key: str = "change_me"
     runpod_template_id: str = "change_me"
     runpod_gpu_type: str = "RTX 4090"
@@ -215,6 +223,29 @@ class Settings(BaseSettings):
             and self.runpod_fallback_min_ram_gb > 0
             and self.runpod_fallback_min_ram_gb < self.runpod_min_ram_gb
         )
+
+    @property
+    def payment_package_amounts_usd(self) -> list[Decimal]:
+        amounts: list[Decimal] = []
+        for raw_amount in self.payment_packages_usd.split(","):
+            raw_amount = raw_amount.strip()
+            if not raw_amount:
+                continue
+            amount = Decimal(raw_amount).quantize(Decimal("0.01"))
+            if amount < Decimal("1.00"):
+                raise ValueError("Payment packages must be at least 1 USD")
+            if amount <= Decimal("0"):
+                raise ValueError("Payment packages must be positive")
+            amounts.append(amount)
+
+        unique_amounts = sorted(set(amounts))
+        if len(unique_amounts) != len(amounts):
+            raise ValueError("Payment packages must be unique")
+        if unique_amounts != amounts:
+            raise ValueError("Payment packages must be sorted ascending")
+        if not unique_amounts:
+            raise ValueError("At least one payment package must be configured")
+        return unique_amounts
 
 
 @lru_cache(maxsize=1)

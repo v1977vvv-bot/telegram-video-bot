@@ -19,3 +19,4 @@ class OpsStatusResponse(BaseModel):
     worker_queue: str
     jobs: dict[str, int]
     runpod_pods: dict[str, int]
+    payments: dict[str, object]

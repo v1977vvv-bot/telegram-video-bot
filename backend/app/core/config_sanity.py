@@ -75,12 +75,14 @@ def build_config_sanity_result(settings: Settings) -> ConfigSanityResult:
         _require_database_config(result, settings)
         _require_redis_config(result, settings)
         _require_storage_config(result, settings)
+        _require_payment_package_config(result, settings)
         _require_production_safety_defaults(result, settings)
     else:
         _warn_if_placeholder(result, "TELEGRAM_BOT_TOKEN", settings.telegram_bot_token)
         _warn_if_placeholder(result, "RUNPOD_API_KEY", settings.runpod_api_key)
         _warn_if_placeholder(result, "RUNPOD_TEMPLATE_ID", settings.runpod_template_id)
         _warn_if_storage_incomplete(result, settings)
+        _warn_if_payment_package_config_invalid(result, settings)
 
     _warn_for_launch_risky_values(result, settings)
     return result
@@ -151,6 +153,33 @@ def _require_production_safety_defaults(
         result.errors.append("RUNPOD_WAITING_GPU_ENABLED must be true for production launch")
     if not settings.runpod_queue_wait_enabled:
         result.errors.append("RUNPOD_QUEUE_WAIT_ENABLED must be true for production launch")
+
+
+def _require_payment_package_config(result: ConfigSanityResult, settings: Settings) -> None:
+    try:
+        _ = settings.payment_package_amounts_usd
+    except (ArithmeticError, ValueError) as exc:
+        result.errors.append(f"PAYMENT_PACKAGES_USD is invalid: {exc}")
+    if not settings.payment_packages_enabled:
+        result.errors.append("PAYMENT_PACKAGES_ENABLED must be true for MVP launch")
+    if settings.payment_custom_amount_enabled:
+        result.errors.append("PAYMENT_CUSTOM_AMOUNT_ENABLED must be false for MVP launch")
+    if settings.payment_display_currency.upper() != "USD":
+        result.errors.append("PAYMENT_DISPLAY_CURRENCY must be USD")
+    if settings.payment_provider_currency.upper() != "USDT":
+        result.errors.append("PAYMENT_PROVIDER_CURRENCY must be USDT")
+    if settings.payment_usd_usdt_rate != 1:
+        result.errors.append("PAYMENT_USD_USDT_RATE must be 1 for MVP launch")
+
+
+def _warn_if_payment_package_config_invalid(
+    result: ConfigSanityResult,
+    settings: Settings,
+) -> None:
+    try:
+        _ = settings.payment_package_amounts_usd
+    except (ArithmeticError, ValueError) as exc:
+        result.warnings.append(f"PAYMENT_PACKAGES_USD is invalid: {exc}")
 
 
 def _warn_for_launch_risky_values(result: ConfigSanityResult, settings: Settings) -> None:

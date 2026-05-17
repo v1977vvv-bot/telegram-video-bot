@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -126,11 +126,22 @@ async def handle_generations(message: Message) -> None:
 
 
 async def handle_top_up(message: Message) -> None:
+    try:
+        packages = await backend_client.get_payment_packages()
+        package_buttons = [(package.display_label, package.amount_usd) for package in packages]
+    except (BackendUnavailableError, BackendClientError):
+        package_buttons = None
+
     await message.answer(
         "💳 Пополнение баланса\n\n"
-        "Скоро здесь будет пополнение через USDT / Cryptomus.\n\n"
-        "Минимальная сумма пополнения будет настроена позже.",
-        reply_markup=top_up_amounts_keyboard(),
+        "Выберите пакет пополнения.\n"
+        "Оплата проходит через Cryptomus в USDT.\n"
+        "Баланс в боте отображается в USD.\n\n"
+        "Если вы оплачиваете через Cryptomus, баланс начисляется автоматически "
+        "после подтверждения платежа.\n\n"
+        "Для бизнес-пакетов или прямой оплаты поддержке напишите в поддержку — "
+        "мы можем зачислить баланс вручную.",
+        reply_markup=top_up_amounts_keyboard(package_buttons),
     )
 
 
@@ -166,10 +177,44 @@ async def handle_generate_video(message: Message) -> None:
     )
 
 
-@router.callback_query(F.data.startswith("top_up_stub:"))
+@router.callback_query(F.data.startswith("top_up_package:"))
 async def handle_top_up_amount(callback: CallbackQuery) -> None:
+    if callback.from_user is None or callback.data is None or callback.message is None:
+        return
+
+    try:
+        amount = Decimal(callback.data.split(":", maxsplit=1)[1])
+    except (InvalidOperation, IndexError):
+        await callback.answer("Неверный пакет пополнения.", show_alert=True)
+        return
+
+    try:
+        invoice = await backend_client.create_payment_invoice(
+            telegram_id=callback.from_user.id,
+            amount_usd=amount,
+        )
+    except (BackendUnavailableError, BackendClientError) as exc:
+        await callback.answer(safe_html(exc, max_len=200), show_alert=True)
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Оплатить через Cryptomus", url=invoice.payment_url)]
+        ]
+    )
+    await callback.message.answer(
+        f"Счёт на ${_money(invoice.amount_usd)} создан.\n"
+        f"Оплатите его в {safe_html(invoice.provider_currency, max_len=16)} через Cryptomus.\n"
+        "После подтверждения баланс пополнится автоматически.",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("top_up_stub:"))
+async def handle_old_top_up_amount(callback: CallbackQuery) -> None:
     await callback.answer(
-        "Пополнение через Cryptomus будет подключено на следующем этапе.",
+        "Сейчас доступны только фиксированные пакеты пополнения: $10, $25, $50, $100.",
         show_alert=True,
     )
 
