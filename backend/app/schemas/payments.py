@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -16,6 +17,7 @@ class PaymentPackageResponse(BaseModel):
 class PaymentPackagesResponse(BaseModel):
     packages_enabled: bool
     custom_amount_enabled: bool
+    payment_provider: str
     display_currency: str
     provider_currency: str
     packages: list[PaymentPackageResponse]
@@ -27,16 +29,18 @@ class CreatePaymentInvoiceRequest(BaseModel):
 
 
 class PaymentInvoiceResponse(BaseModel):
+    provider: str
     payment_id: UUID
     amount_usd: Decimal
     display_currency: str
     provider_currency: str
     provider_amount: Decimal
     payment_url: str
+    expires_at: datetime | None = None
     status: str
 
 
-class CryptomusWebhookResponse(BaseModel):
+class PaymentWebhookResponse(BaseModel):
     ok: bool
     payment_id: UUID | None = None
     status: str | None = None

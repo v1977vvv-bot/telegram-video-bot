@@ -36,6 +36,12 @@ class PaymentStatus(StrEnum):
     EXPIRED = "expired"
 
 
+class PaymentProvider(StrEnum):
+    CRYPTOBOT = "cryptobot"
+    CRYPTOMUS = "cryptomus"
+    MANUAL = "manual"
+
+
 class StorageProvider(StrEnum):
     CLOUDFLARE_R2 = "cloudflare_r2"
     LOCAL = "local"

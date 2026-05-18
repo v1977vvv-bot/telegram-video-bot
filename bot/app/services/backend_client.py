@@ -146,6 +146,7 @@ class PaymentPackageDto:
 
 @dataclass(frozen=True, slots=True)
 class PaymentInvoiceDto:
+    provider: str
     payment_id: UUID
     amount_usd: Decimal
     display_currency: str
@@ -360,10 +361,11 @@ class BotBackendClient:
     ) -> PaymentInvoiceDto:
         data = await self._request(
             "POST",
-            "/api/v1/payments/cryptomus/invoices",
+            "/api/v1/payments/invoices",
             json={"telegram_id": telegram_id, "amount_usd": str(amount_usd)},
         )
         return PaymentInvoiceDto(
+            provider=str(data["provider"]),
             payment_id=UUID(data["payment_id"]),
             amount_usd=Decimal(str(data["amount_usd"])),
             display_currency=str(data["display_currency"]),

@@ -910,10 +910,14 @@ async def _admin_job_item(
 def _admin_payment_item(payment: Payment, user: User) -> AdminPaymentListItem:
     metadata = payment.raw_payload if isinstance(payment.raw_payload, dict) else {}
     provider_currency = _optional_str(metadata.get("provider_currency"))
+    provider_amount = _optional_decimal(metadata.get("provider_amount"))
+    payment_url = _optional_str(metadata.get("payment_url"))
     if provider_currency is None:
         nested = metadata.get("ultronlab_metadata")
         if isinstance(nested, dict):
             provider_currency = _optional_str(nested.get("provider_currency"))
+            provider_amount = _optional_decimal(nested.get("provider_amount"))
+            payment_url = _optional_str(nested.get("payment_url"))
     return AdminPaymentListItem(
         id=payment.id,
         user=AdminUserSummary(id=user.id, telegram_id=user.telegram_id, username=user.username),
@@ -922,6 +926,8 @@ def _admin_payment_item(payment: Payment, user: User) -> AdminPaymentListItem:
         amount_usd=payment.amount_usd,
         currency=payment.currency,
         provider_currency=provider_currency,
+        provider_amount=provider_amount,
+        payment_url=payment_url,
         status=payment.status,
         created_at=payment.created_at,
         updated_at=payment.updated_at,
@@ -1450,6 +1456,15 @@ def _money(value: Any) -> Decimal:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _optional_decimal(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
 
 
 def _truncate(value: str | None, max_len: int) -> str | None:

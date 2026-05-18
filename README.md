@@ -1,7 +1,7 @@
 # Telegram Video Avatar Bot
 
-Production-ready skeleton for a Telegram bot that will generate videos from a
-photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomus.
+Production-ready skeleton for a Telegram bot that generates videos from a photo and
+audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Telegram Crypto Pay.
 
 ## What is implemented now
 
@@ -12,8 +12,9 @@ photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomu
 - User statistics endpoint: `GET /api/v1/users/by-telegram/{telegram_id}/statistics`.
 - User generation history endpoint: `GET /api/v1/users/by-telegram/{telegram_id}/generations`.
 - Fixed payment package endpoints: `GET /api/v1/payments/packages`,
-  `POST /api/v1/payments/cryptomus/invoices`, and
-  `POST /api/v1/payments/cryptomus/webhook`.
+  `POST /api/v1/payments/invoices`, `POST /api/v1/payments/cryptobot/invoices`,
+  `POST /api/v1/payments/cryptobot/webhook`, plus legacy disabled-by-config
+  Cryptomus endpoints.
 - Debug endpoint `POST /api/v1/debug/enqueue-ping` that enqueues a Celery task.
 - Local debug balance endpoint: `POST /api/v1/debug/users/{telegram_id}/add-balance`.
 - Local debug batch endpoint: `POST /api/v1/debug/users/{telegram_id}/mock-generation-jobs`.
@@ -51,8 +52,9 @@ photo and audio using RunPod, ComfyUI, InfiniteTalk, Cloudflare R2, and Cryptomu
 - Cloudflare R2 upload and presigned download URLs when `STORAGE_PROVIDER=cloudflare_r2`.
 - InfiniteTalk API workflow patcher for ComfyUI node ids `313`, `125`, `245`, `246`,
   `270`, `194`, and `317`.
-- Interface stubs for Cryptomus plus implemented pricing, audio, video stitching, storage,
-  ComfyUI, and RunPod pod lifecycle boundaries.
+- Payment provider abstraction with CryptoBot/Crypto Pay and legacy Cryptomus support,
+  plus implemented pricing, audio, video stitching, storage, ComfyUI, and RunPod pod
+  lifecycle boundaries.
 - Placeholder workflow at `workflows/infinite_talk_base.json` and API workflow at
   `workflows/infinite_talk_api.json`.
 
@@ -74,7 +76,7 @@ Fill real secrets where needed:
 - `TELEGRAM_BOT_TOKEN`
 - `SUPPORT_TELEGRAM_USERNAME`
 - `CLOUDFLARE_R2_*`
-- `CRYPTOMUS_*`
+- `CRYPTOBOT_PAY_API_TOKEN`
 - `RUNPOD_*`
 
 For production, set `APP_ENV=production`. `.env.example` keeps safe MVP launch defaults:
@@ -116,7 +118,8 @@ Top-ups are fixed packages only:
 - `$50`
 - `$100`
 
-Users pay through Cryptomus in USDT. The bot balance is displayed and accounted in USD.
+Users pay through the configured payment provider in USDT. The default MVP provider is
+Telegram CryptoBot / Crypto Pay. The bot balance is displayed and accounted in USD.
 For the MVP, USD and USDT are treated as `1:1` for package accounting. Custom top-up
 amounts are disabled, bonuses are not applied, and the bot does not show an estimated
 number of generations per package.
@@ -124,6 +127,7 @@ number of generations per package.
 Payment settings:
 
 ```env
+PAYMENT_PROVIDER=cryptobot
 PAYMENT_PACKAGES_ENABLED=true
 PAYMENT_CUSTOM_AMOUNT_ENABLED=false
 PAYMENT_PACKAGES_USD=10,25,50,100
@@ -131,8 +135,36 @@ PAYMENT_DISPLAY_CURRENCY=USD
 PAYMENT_PROVIDER_CURRENCY=USDT
 PAYMENT_USD_USDT_RATE=1
 PAYMENT_SHOW_ESTIMATED_GENERATIONS=false
+CRYPTOBOT_PAY_ENABLED=true
+CRYPTOBOT_PAY_API_TOKEN=...
+CRYPTOBOT_PAY_API_BASE_URL=https://pay.crypt.bot/api
+CRYPTOBOT_PAY_ASSET=USDT
+CRYPTOBOT_PAY_WEBHOOK_URL=https://YOUR_DOMAIN/api/v1/payments/cryptobot/webhook
+CRYPTOMUS_ENABLED=false
 PRICING_MIN_JOB_PRICE_USD=0.30
 ```
+
+Payment provider modes:
+
+- `PAYMENT_PROVIDER=cryptobot`: create CryptoBot/Crypto Pay invoices through
+  `POST /api/v1/payments/invoices`.
+- `PAYMENT_PROVIDER=cryptomus`: legacy Cryptomus integration, enabled only when
+  `CRYPTOMUS_ENABLED=true`.
+- `PAYMENT_PROVIDER=manual`: automatic invoice creation is disabled; users are told to
+  contact support, and admins can use manual top-up actions.
+
+CryptoBot setup:
+
+1. Open `@CryptoBot`.
+2. Open Crypto Pay / Apps and create an app for the bot.
+3. Copy the Crypto Pay API token into `CRYPTOBOT_PAY_API_TOKEN`.
+4. Configure the webhook URL:
+   `https://YOUR_DOMAIN/api/v1/payments/cryptobot/webhook`.
+5. Keep `CRYPTOBOT_PAY_ASSET=USDT`.
+
+CryptoBot webhooks are verified with the `crypto-pay-api-signature` HMAC header and
+then rechecked through `getInvoices` before any balance is credited. Duplicate paid
+webhooks are idempotent and do not double-credit the balance.
 
 Generation funds are reserved before generation and captured only after successful
 output upload. Failed generations refund the reserved balance. Business packages or
@@ -183,8 +215,9 @@ curl -X DELETE http://localhost:8000/api/v1/debug/business-accounts/{id}/members
 ```
 
 Telegram statistics show company balance when a user has an active business account.
-The top-up menu remains the personal Cryptomus package flow; users with business
-balance see a note that company top-ups are handled through support.
+The top-up menu remains the personal fixed-package flow through the configured
+payment provider; users with business balance see a note that company top-ups are
+handled through support.
 
 ## Admin panel MVP
 
@@ -326,7 +359,7 @@ Report filters:
 
 Definitions:
 
-- `payment_topups_usd`: successful Cryptomus package payments.
+- `payment_topups_usd`: successful automatic package payments from the active provider.
 - `manual_personal_topups_usd`: admin/manual personal balance adjustments.
 - `manual_business_topups_usd`: manual business account top-ups.
 - `captured_revenue_usd`: completed generation job revenue with a capture ledger
@@ -812,7 +845,7 @@ Check statistics:
 curl http://localhost:8000/api/v1/users/by-telegram/123456789/statistics
 ```
 
-Add local test balance without Cryptomus:
+Add local test balance without an automatic payment provider:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/debug/users/123456789/add-balance \
@@ -1115,14 +1148,14 @@ docker compose -f docker-compose.prod.yml --env-file .env.production --profile p
 
 Point the domain DNS A/AAAA records to the server before starting Caddy. The MVP bot
 uses Telegram polling, so no Telegram webhook migration is required for Stage 10.
-Configure Cryptomus callback URL in the merchant dashboard as:
+Configure the CryptoBot/Crypto Pay webhook URL in the app settings as:
 
 ```text
-https://YOUR_DOMAIN/api/v1/payments/cryptomus/webhook
+https://YOUR_DOMAIN/api/v1/payments/cryptobot/webhook
 ```
 
-If your deployed payment route differs, use the actual backend route from the payment
-module.
+If `PAYMENT_PROVIDER=cryptomus`, use the legacy Cryptomus callback route:
+`https://YOUR_DOMAIN/api/v1/payments/cryptomus/webhook`.
 
 Local-only debug access in production:
 
@@ -1147,7 +1180,7 @@ First production smoke test:
 2. Check `GET /api/v1/health` and `GET /api/v1/ops/status`.
 3. Confirm the Telegram bot responds.
 4. Check user balance display.
-5. Create a Cryptomus invoice with the smallest package/current payment flow.
+5. Create a CryptoBot invoice with the smallest package/current payment flow.
 6. Confirm the payment callback updates balance.
 7. Run one short generation.
 8. Confirm final video delivery and the R2 download button.
@@ -1165,7 +1198,7 @@ Pre-launch environment:
 - Set `DEBUG_ENDPOINTS_ENABLED=false`.
 - Keep `ADMIN_PANEL_ENABLED=false` until HTTPS and strong admin credentials are ready.
   If enabled, set `ADMIN_BASIC_AUTH_PASSWORD` to a strong secret.
-- Set real `TELEGRAM_BOT_TOKEN`, `CRYPTOMUS_*`, `RUNPOD_API_KEY`,
+- Set real `TELEGRAM_BOT_TOKEN`, `CRYPTOBOT_PAY_API_TOKEN`, `RUNPOD_API_KEY`,
   `RUNPOD_TEMPLATE_ID`, PostgreSQL, Redis, and `CLOUDFLARE_R2_*` values.
 - Keep `DISTRIBUTED_SEGMENT_GENERATION_ENABLED=false` for MVP launch.
 - Keep `RUNPOD_MAX_ACTIVE_PODS` low, normally `1`, until cost and pod locking are
@@ -1176,7 +1209,7 @@ Pre-launch environment:
 - Confirm the database and Redis volumes exist and are mounted by production compose.
 - Configure recurring PostgreSQL backups.
 - Confirm DNS points to the server and HTTPS works.
-- Configure the Cryptomus callback URL.
+- Configure the CryptoBot webhook URL.
 - Verify RunPod API key/template and Cloudflare R2 access.
 - Run one test payment and one short test generation.
 - Check active RunPod pods after the generation.
@@ -1382,4 +1415,4 @@ ComfyUI troubleshooting:
 - Waiting-for-GPU queue/retry instead of immediate failed+refund when capacity is unavailable.
 - Segment overlap/crossfade and improved continuity.
 - Production cleanup scheduling and storage lifecycle policies.
-- Cryptomus invoice creation and webhook processing.
+- Optional payment-provider refinements and live webhook hardening.

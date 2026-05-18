@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from shared.app.config import Settings
-from shared.app.enums import StorageProvider
+from shared.app.enums import PaymentProvider, StorageProvider
 from shared.app.logging import get_logger
 
 logger = get_logger(__name__)
@@ -64,19 +64,13 @@ def build_config_sanity_result(settings: Settings) -> ConfigSanityResult:
             settings.telegram_bot_token,
             token_must_look_like_telegram=True,
         )
-        _require_production_secret(result, "CRYPTOMUS_MERCHANT_ID", settings.cryptomus_merchant_id)
-        _require_production_secret(result, "CRYPTOMUS_API_KEY", settings.cryptomus_api_key)
-        _require_production_secret(
-            result,
-            "CRYPTOMUS_WEBHOOK_SECRET",
-            settings.cryptomus_webhook_secret,
-        )
         _require_production_secret(result, "RUNPOD_API_KEY", settings.runpod_api_key)
         _require_production_secret(result, "RUNPOD_TEMPLATE_ID", settings.runpod_template_id)
         _require_database_config(result, settings)
         _require_redis_config(result, settings)
         _require_storage_config(result, settings)
         _require_payment_package_config(result, settings)
+        _require_payment_provider_config(result, settings)
         _require_runpod_cost_config(result, settings)
         _require_admin_config(result, settings)
         _require_production_safety_defaults(result, settings)
@@ -86,6 +80,7 @@ def build_config_sanity_result(settings: Settings) -> ConfigSanityResult:
         _warn_if_placeholder(result, "RUNPOD_TEMPLATE_ID", settings.runpod_template_id)
         _warn_if_storage_incomplete(result, settings)
         _warn_if_payment_package_config_invalid(result, settings)
+        _warn_if_payment_provider_config_invalid(result, settings)
         _warn_if_runpod_cost_config_invalid(result, settings)
         _warn_if_admin_config_invalid(result, settings)
 
@@ -175,6 +170,56 @@ def _require_payment_package_config(result: ConfigSanityResult, settings: Settin
         result.errors.append("PAYMENT_PROVIDER_CURRENCY must be USDT")
     if settings.payment_usd_usdt_rate != 1:
         result.errors.append("PAYMENT_USD_USDT_RATE must be 1 for MVP launch")
+
+
+def _require_payment_provider_config(result: ConfigSanityResult, settings: Settings) -> None:
+    provider = settings.payment_provider_normalized
+    if provider not in {item.value for item in PaymentProvider}:
+        result.errors.append("PAYMENT_PROVIDER must be one of cryptobot, cryptomus, manual")
+        return
+    if provider == PaymentProvider.CRYPTOBOT.value:
+        if not settings.cryptobot_pay_enabled:
+            result.errors.append(
+                "CRYPTOBOT_PAY_ENABLED must be true when PAYMENT_PROVIDER=cryptobot"
+            )
+        if not settings.cryptobot_pay_configured:
+            result.errors.append("CRYPTOBOT_PAY_API_TOKEN must be configured for production")
+        if settings.cryptobot_pay_asset.upper() != "USDT":
+            result.errors.append("CRYPTOBOT_PAY_ASSET must be USDT for MVP launch")
+        if settings.payment_provider_currency.upper() != "USDT":
+            result.errors.append("PAYMENT_PROVIDER_CURRENCY must be USDT for CryptoBot")
+        if not settings.cryptobot_pay_webhook_url.strip():
+            result.warnings.append("CRYPTOBOT_PAY_WEBHOOK_URL is empty in production")
+    elif provider == PaymentProvider.CRYPTOMUS.value:
+        if not settings.cryptomus_enabled:
+            result.errors.append("CRYPTOMUS_ENABLED must be true when PAYMENT_PROVIDER=cryptomus")
+        _require_production_secret(result, "CRYPTOMUS_MERCHANT_ID", settings.cryptomus_merchant_id)
+        _require_production_secret(result, "CRYPTOMUS_API_KEY", settings.cryptomus_api_key)
+        _require_production_secret(
+            result,
+            "CRYPTOMUS_WEBHOOK_SECRET",
+            settings.cryptomus_webhook_secret,
+        )
+
+
+def _warn_if_payment_provider_config_invalid(
+    result: ConfigSanityResult,
+    settings: Settings,
+) -> None:
+    provider = settings.payment_provider_normalized
+    if provider not in {item.value for item in PaymentProvider}:
+        result.warnings.append("PAYMENT_PROVIDER must be one of cryptobot, cryptomus, manual")
+        return
+    if provider == PaymentProvider.CRYPTOBOT.value:
+        if not settings.cryptobot_pay_enabled:
+            result.warnings.append("CRYPTOBOT_PAY_ENABLED=false while PAYMENT_PROVIDER=cryptobot")
+        if not settings.cryptobot_pay_configured:
+            result.warnings.append("CRYPTOBOT_PAY_API_TOKEN is not configured")
+        if settings.cryptobot_pay_asset.upper() != "USDT":
+            result.warnings.append("CRYPTOBOT_PAY_ASSET should be USDT for MVP")
+    elif provider == PaymentProvider.CRYPTOMUS.value:
+        if not settings.cryptomus_enabled:
+            result.warnings.append("CRYPTOMUS_ENABLED=false while PAYMENT_PROVIDER=cryptomus")
 
 
 def _require_runpod_cost_config(result: ConfigSanityResult, settings: Settings) -> None:

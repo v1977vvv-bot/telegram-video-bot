@@ -116,6 +116,8 @@ class AdminPaymentListItem(BaseModel):
     amount_usd: Decimal
     currency: str
     provider_currency: str | None
+    provider_amount: Decimal | None = None
+    payment_url: str | None = None
     status: str
     created_at: datetime
     updated_at: datetime

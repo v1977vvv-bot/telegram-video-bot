@@ -126,11 +126,14 @@ def _payment_ops_status(settings) -> dict[str, object]:
     except Exception:
         package_amounts = []
     return {
+        "payment_provider": settings.payment_provider_normalized,
         "packages_enabled": settings.payment_packages_enabled,
         "packages_usd": package_amounts,
         "custom_amount_enabled": settings.payment_custom_amount_enabled,
         "display_currency": settings.payment_display_currency,
         "provider_currency": settings.payment_provider_currency,
+        "cryptomus_enabled": settings.cryptomus_enabled,
+        "cryptobot_enabled": settings.cryptobot_pay_enabled,
     }
 
 

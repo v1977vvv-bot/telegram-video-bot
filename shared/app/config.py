@@ -68,7 +68,9 @@ class Settings(BaseSettings):
     cryptomus_merchant_id: str = "change_me"
     cryptomus_api_key: str = "change_me"
     cryptomus_webhook_secret: str = "change_me"
+    cryptomus_enabled: bool = False
 
+    payment_provider: str = "cryptobot"
     payment_packages_enabled: bool = True
     payment_custom_amount_enabled: bool = False
     payment_packages_usd: str = "10,25,50,100"
@@ -76,6 +78,17 @@ class Settings(BaseSettings):
     payment_provider_currency: str = "USDT"
     payment_usd_usdt_rate: Decimal = Field(default=Decimal("1"))
     payment_show_estimated_generations: bool = False
+
+    cryptobot_pay_enabled: bool = True
+    cryptobot_pay_api_token: str = ""
+    cryptobot_pay_api_base_url: str = "https://pay.crypt.bot/api"
+    cryptobot_pay_asset: str = "USDT"
+    cryptobot_pay_webhook_secret: str = ""
+    cryptobot_pay_webhook_path: str = "/api/v1/payments/cryptobot/webhook"
+    cryptobot_pay_webhook_url: str = ""
+    cryptobot_pay_allow_comments: bool = False
+    cryptobot_pay_allow_anonymous: bool = True
+    cryptobot_pay_expires_in_seconds: int = 3600
 
     runpod_api_key: str = "change_me"
     runpod_template_id: str = "change_me"
@@ -292,6 +305,15 @@ class Settings(BaseSettings):
         if not unique_amounts:
             raise ValueError("At least one payment package must be configured")
         return unique_amounts
+
+    @property
+    def payment_provider_normalized(self) -> str:
+        return self.payment_provider.strip().lower()
+
+    @property
+    def cryptobot_pay_configured(self) -> bool:
+        token = self.cryptobot_pay_api_token.strip()
+        return bool(token and token != "change_me")
 
 
 @lru_cache(maxsize=1)

@@ -145,17 +145,29 @@ async def handle_top_up(message: Message) -> None:
     except (BackendUnavailableError, BackendClientError):
         package_buttons = None
 
-    await message.answer(
-        "💳 Пополнение баланса\n\n"
-        "Выберите пакет пополнения.\n"
-        "Оплата проходит через Cryptomus в USDT.\n"
-        "Баланс в боте отображается в USD.\n\n"
-        "Если вы оплачиваете через Cryptomus, баланс начисляется автоматически "
-        "после подтверждения платежа.\n\n"
-        "Для бизнес-пакетов или прямой оплаты поддержке напишите в поддержку — "
-        "мы можем зачислить баланс вручную.",
-        reply_markup=top_up_amounts_keyboard(package_buttons),
-    )
+    provider = get_settings().payment_provider_normalized
+    if provider == "manual":
+        text = (
+            "💳 Пополнение баланса\n\n"
+            "Автоматическое пополнение временно недоступно.\n\n"
+            "Для пополнения баланса напишите в поддержку. После оплаты администратор "
+            "зачислит средства вручную.\n\n"
+            "Для бизнес-пакетов и прямой оплаты поддержке напишите в поддержку."
+        )
+        package_buttons = None
+    else:
+        provider_name = _payment_provider_name(provider)
+        text = (
+            "💳 Пополнение баланса\n\n"
+            "Выберите пакет пополнения.\n"
+            f"Оплата проходит через {provider_name} в USDT.\n"
+            "Баланс в боте отображается в USD.\n\n"
+            "После подтверждения платежа баланс пополнится автоматически.\n\n"
+            "Для бизнес-пакетов или прямой оплаты поддержке напишите в поддержку — "
+            "мы можем зачислить баланс вручную."
+        )
+
+    await message.answer(text, reply_markup=top_up_amounts_keyboard(package_buttons))
 
 
 async def handle_help(message: Message) -> None:
@@ -210,14 +222,16 @@ async def handle_top_up_amount(callback: CallbackQuery) -> None:
         await callback.answer(safe_html(exc, max_len=200), show_alert=True)
         return
 
+    provider_name = _payment_provider_name(invoice.provider)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Оплатить через Cryptomus", url=invoice.payment_url)]
+            [InlineKeyboardButton(text=f"Оплатить через {provider_name}", url=invoice.payment_url)]
         ]
     )
     await callback.message.answer(
         f"Счёт на ${_money(invoice.amount_usd)} создан.\n"
-        f"Оплатите его в {safe_html(invoice.provider_currency, max_len=16)} через Cryptomus.\n"
+        f"Оплатите его в {safe_html(invoice.provider_currency, max_len=16)} "
+        f"через {safe_html(provider_name, max_len=32)}.\n"
         "После подтверждения баланс пополнится автоматически.",
         reply_markup=keyboard,
     )
@@ -273,6 +287,14 @@ def _format_generation_item(index: int, item: GenerationHistoryItemDto) -> str:
 
 def _money(value: Decimal) -> str:
     return f"{value.quantize(Decimal('0.0001'))}"
+
+
+def _payment_provider_name(provider: str) -> str:
+    if provider == "cryptobot":
+        return "CryptoBot"
+    if provider == "cryptomus":
+        return "Cryptomus"
+    return "поддержку"
 
 
 def _fit_history_parts(
