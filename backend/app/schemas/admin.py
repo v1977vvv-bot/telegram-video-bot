@@ -228,3 +228,57 @@ class AdminAuditLogsResponse(BaseModel):
     items: list[AdminAuditLogItem]
     limit: int
     offset: int
+
+
+class ManualPersonalTopUpRequest(BaseModel):
+    amount_usd: Decimal
+    reason: str
+
+
+class ManualBusinessTopUpRequest(BaseModel):
+    amount_usd: Decimal
+    reason: str
+
+
+class BusinessMemberAddRequest(BaseModel):
+    telegram_id: int | None = None
+    user_id: UUID | None = None
+    role: str = "member"
+    reason: str
+
+
+class BusinessMemberRemoveRequest(BaseModel):
+    reason: str
+
+
+class FailRefundJobRequest(BaseModel):
+    reason: str
+
+
+class TerminateRunPodRequest(BaseModel):
+    reason: str
+
+
+class RetryWaitingJobsRequest(BaseModel):
+    reason: str
+
+
+class UserBlockRequest(BaseModel):
+    reason: str
+
+
+class AdminActionResponse(BaseModel):
+    success: bool
+    target_id: str
+    action: str
+    audit_log_id: UUID | None = None
+    old_state: str | None = None
+    new_state: str | None = None
+    transaction_id: UUID | None = None
+    amount_usd: Decimal | None = None
+    balance_available_usd: Decimal | None = None
+    balance_frozen_usd: Decimal | None = None
+    telegram_notification_sent: bool | None = None
+    warning: str | None = None
+    enqueued: int | None = None
+    job_ids: list[UUID] | None = None

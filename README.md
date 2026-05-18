@@ -202,6 +202,9 @@ ADMIN_BASIC_AUTH_PASSWORD=replace_with_a_strong_password
 ADMIN_SESSION_COOKIE_NAME=admin_session
 ADMIN_SESSION_SECRET=
 ADMIN_SESSION_TTL_SECONDS=86400
+ADMIN_ACTIONS_ENABLED=false
+ADMIN_MAX_MANUAL_TOPUP_USD=500
+ADMIN_REQUIRE_ACTION_REASON=true
 ```
 
 Open:
@@ -237,12 +240,68 @@ Stage 11.1 does not expose destructive buttons or write actions. Manual top-up,
 fail-refund, RunPod termination, and other operator actions remain available only
 through existing protected local debug endpoints until Stage 11.2.
 
+Stage 11.2 adds protected operator actions behind `ADMIN_ACTIONS_ENABLED=true`:
+
+- manual personal balance top-up
+- manual business balance top-up
+- add/deactivate business account members
+- fail/refund a generation job through the existing safe refund path
+- retry waiting GPU/pod jobs
+- terminate non-busy managed RunPod pods
+- block/unblock users
+
+Admin action examples:
+
+```bash
+curl -u admin:replace_with_a_strong_password \
+  -X POST http://localhost:8000/api/v1/admin/users/{user_id}/balance/top-up \
+  -H 'Content-Type: application/json' \
+  -d '{"amount_usd":"10.00","reason":"Direct payment"}'
+
+curl -u admin:replace_with_a_strong_password \
+  -X POST http://localhost:8000/api/v1/admin/business-accounts/{id}/balance/top-up \
+  -H 'Content-Type: application/json' \
+  -d '{"amount_usd":"100.00","reason":"Direct business payment"}'
+
+curl -u admin:replace_with_a_strong_password \
+  -X POST http://localhost:8000/api/v1/admin/business-accounts/{id}/members \
+  -H 'Content-Type: application/json' \
+  -d '{"telegram_id":123456789,"role":"member","reason":"Added by admin"}'
+
+curl -u admin:replace_with_a_strong_password \
+  -X POST http://localhost:8000/api/v1/admin/business-accounts/{id}/members/{user_id}/deactivate \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Removed by admin"}'
+
+curl -u admin:replace_with_a_strong_password \
+  -X POST http://localhost:8000/api/v1/admin/jobs/{job_id}/fail-refund \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Manual refund after support review"}'
+
+curl -u admin:replace_with_a_strong_password \
+  -X POST http://localhost:8000/api/v1/admin/jobs/retry-waiting \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Manual retry from admin panel"}'
+
+curl -u admin:replace_with_a_strong_password \
+  -X POST http://localhost:8000/api/v1/admin/runpod/pods/{runpod_pod_id}/terminate \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Terminate idle/stuck pod"}'
+```
+
+Every admin action requires Basic Auth, `ADMIN_PANEL_ENABLED=true`,
+`ADMIN_ACTIONS_ENABLED=true`, and a reason when `ADMIN_REQUIRE_ACTION_REASON=true`.
+Actions write `admin_audit_logs`. Balance changes always go through balance ledger
+transactions. Telegram notifications are attempted for top-ups, business membership
+changes, and fail-refund, but notification failure does not roll back the action.
+
 Production safety:
 
 - Do not enable the admin panel without HTTPS.
 - Use a strong Basic Auth password, at least 12 characters.
 - Prefer an IP allowlist or private reverse-proxy path in addition to Basic Auth.
 - Keep `DEBUG_ENDPOINTS_ENABLED=false` in production.
+- Keep `ADMIN_ACTIONS_ENABLED=false` unless an operator needs write controls.
 - If `APP_ENV=production` and `ADMIN_PANEL_ENABLED=true`, startup sanity checks require
   configured admin credentials.
 

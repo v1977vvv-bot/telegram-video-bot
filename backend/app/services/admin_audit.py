@@ -24,7 +24,7 @@ class AdminAuditService:
         target_type: str | None = None,
         target_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> AdminAuditLog:
         entry = AdminAuditLog(
             admin_identifier=admin_identifier,
             action=action,
@@ -37,6 +37,8 @@ class AdminAuditService:
             audit_metadata=metadata,
         )
         self._session.add(entry)
+        await self._session.flush()
+        return entry
 
     async def log_best_effort(
         self,

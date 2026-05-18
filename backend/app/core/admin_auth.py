@@ -52,6 +52,17 @@ def require_admin_auth(
     return AdminPrincipal(credentials.username)
 
 
+def require_admin_actions_enabled() -> Settings:
+    settings = require_admin_enabled()
+    if not settings.admin_actions_enabled:
+        raise AppError(
+            "Admin actions are disabled",
+            code="admin_actions_disabled",
+            status_code=403,
+        )
+    return settings
+
+
 def _basic_challenge() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

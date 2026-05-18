@@ -62,6 +62,10 @@ async def get_ops_status(session: SessionDep, response: Response) -> OpsStatusRe
         runpod_costs=_runpod_cost_ops_status(settings),
         payments=_payment_ops_status(settings),
         business=business,
+        admin={
+            "admin_panel_enabled": settings.admin_panel_enabled,
+            "admin_actions_enabled": settings.admin_actions_enabled,
+        },
     )
 
 

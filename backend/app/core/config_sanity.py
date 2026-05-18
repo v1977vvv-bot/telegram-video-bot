@@ -197,6 +197,13 @@ def _require_admin_config(result: ConfigSanityResult, settings: Settings) -> Non
         result.errors.append(
             "ADMIN_BASIC_AUTH_PASSWORD must be configured and at least 12 characters"
         )
+    if settings.admin_actions_enabled:
+        if not settings.admin_panel_enabled:
+            result.errors.append("ADMIN_PANEL_ENABLED must be true when ADMIN_ACTIONS_ENABLED=true")
+        if settings.admin_max_manual_topup_usd <= Decimal("0"):
+            result.errors.append("ADMIN_MAX_MANUAL_TOPUP_USD must be positive")
+        if settings.admin_max_manual_topup_usd > Decimal("10000"):
+            result.errors.append("ADMIN_MAX_MANUAL_TOPUP_USD is above the MVP safety cap")
 
 
 def _warn_if_payment_package_config_invalid(
@@ -228,6 +235,10 @@ def _warn_if_admin_config_invalid(result: ConfigSanityResult, settings: Settings
         result.warnings.append("ADMIN_BASIC_AUTH_PASSWORD is not configured")
     elif len(settings.admin_basic_auth_password) < 12:
         result.warnings.append("ADMIN_BASIC_AUTH_PASSWORD is shorter than 12 characters")
+    if settings.admin_actions_enabled and not settings.admin_panel_enabled:
+        result.warnings.append("ADMIN_ACTIONS_ENABLED=true while ADMIN_PANEL_ENABLED=false")
+    if settings.admin_max_manual_topup_usd <= Decimal("0"):
+        result.warnings.append("ADMIN_MAX_MANUAL_TOPUP_USD must be positive")
 
 
 def _runpod_cost_config_errors(settings: Settings) -> list[str]:
@@ -265,6 +276,8 @@ def _warn_for_launch_risky_values(result: ConfigSanityResult, settings: Settings
         result.warnings.append(
             "RUNPOD_COST_ROUNDING_MODE is unknown; cost tracking falls back to up_to_second"
         )
+    if settings.admin_actions_enabled:
+        result.warnings.append("ADMIN_ACTIONS_ENABLED=true; restrict operator access carefully")
 
 
 def _warn_if_storage_incomplete(result: ConfigSanityResult, settings: Settings) -> None:

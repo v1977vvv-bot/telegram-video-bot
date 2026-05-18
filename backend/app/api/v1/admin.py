@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Any
 from uuid import UUID
 
+import anyio
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.admin_auth import AdminPrincipal, require_admin_auth
+from backend.app.api.v1.debug import (
+    _fail_generation_job_with_refund,
+    _retry_debug_waiting_jobs,
+    _terminate_runpod_pod,
+)
+from backend.app.core.admin_auth import (
+    AdminPrincipal,
+    require_admin_actions_enabled,
+    require_admin_auth,
+)
 from backend.app.models.admin_audit_log import AdminAuditLog
 from backend.app.models.balance_account import BalanceAccount
 from backend.app.models.balance_transaction import BalanceTransaction
@@ -21,6 +31,7 @@ from backend.app.models.payment import Payment
 from backend.app.models.runpod_pod import RunpodPod
 from backend.app.models.user import User
 from backend.app.schemas.admin import (
+    AdminActionResponse,
     AdminAuditLogItem,
     AdminAuditLogsResponse,
     AdminBusinessAccountDetailResponse,
@@ -46,12 +57,25 @@ from backend.app.schemas.admin import (
     AdminUserListItem,
     AdminUsersResponse,
     AdminUserSummary,
+    BusinessMemberAddRequest,
+    BusinessMemberRemoveRequest,
+    FailRefundJobRequest,
+    ManualBusinessTopUpRequest,
+    ManualPersonalTopUpRequest,
+    RetryWaitingJobsRequest,
+    TerminateRunPodRequest,
+    UserBlockRequest,
 )
 from backend.app.services.admin_audit import AdminAuditService
+from backend.app.services.balances import BalanceService
+from backend.app.services.business_balance import BusinessBalanceService
+from backend.app.services.telegram_notify import TelegramNotificationService
+from shared.app.config import Settings
 from shared.app.database import get_session
 from shared.app.enums import (
     BalanceTransactionType,
     BillingAccountType,
+    BusinessAccountMemberRole,
     BusinessAccountStatus,
     BusinessBalanceTransactionType,
     JobStatus,
@@ -59,12 +83,15 @@ from shared.app.enums import (
     PodStatus,
 )
 from shared.app.exceptions import AppError
+from worker.app.services.runpod import RunPodError
 from worker.app.services.runpod_costs import RunPodCostService, calculate_gross_margin
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 AdminDep = Annotated[AdminPrincipal, Depends(require_admin_auth)]
+ActionSettingsDep = Annotated[Settings, Depends(require_admin_actions_enabled)]
 MONEY_ZERO = Decimal("0.0000")
+MONEY_QUANT = Decimal("0.0001")
 ACTIVE_POD_STATUSES = {
     PodStatus.CREATING.value,
     PodStatus.STARTING.value,
@@ -235,6 +262,481 @@ async def list_admin_audit_logs(
         items=[_admin_audit_log_item(item) for item in result.scalars()],
         limit=limit,
         offset=offset,
+    )
+
+
+@router.post("/users/{user_id}/balance/top-up", response_model=AdminActionResponse)
+async def admin_top_up_personal_balance(
+    user_id: UUID,
+    payload: ManualPersonalTopUpRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminActionResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    amount = _validate_admin_amount(payload.amount_usd, settings)
+    telegram_id: int | None = None
+    notification_sent = False
+    warning: str | None = None
+
+    async with session.begin():
+        user = await session.get(User, user_id)
+        if user is None:
+            raise AppError("User not found", code="user_not_found", status_code=404)
+        balance_service = BalanceService(session)
+        account, transaction = await balance_service.admin_adjustment_balance_in_transaction(
+            user_id=user.id,
+            amount_usd=amount,
+            reason=reason,
+        )
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="personal_balance_topup",
+            request=request,
+            target_type="user",
+            target_id=str(user.id),
+            metadata={"amount_usd": str(amount), "reason": reason},
+        )
+        telegram_id = user.telegram_id
+        available = account.available_usd
+        frozen = account.frozen_usd
+        transaction_id = transaction.id
+        audit_log_id = audit_log.id
+
+    message = (
+        "✅ Баланс пополнен\n\n"
+        f"На ваш баланс зачислено: ${amount}\n"
+        f"Текущий баланс: ${available}\n\n"
+        "Теперь вы можете запустить генерацию."
+    )
+    notification_sent, warning = await _send_telegram_notification(
+        telegram_id=telegram_id,
+        message=message,
+    )
+    return AdminActionResponse(
+        success=True,
+        target_id=str(user_id),
+        action="personal_balance_topup",
+        audit_log_id=audit_log_id,
+        transaction_id=transaction_id,
+        amount_usd=amount,
+        balance_available_usd=available,
+        balance_frozen_usd=frozen,
+        telegram_notification_sent=notification_sent,
+        warning=warning,
+    )
+
+
+@router.post(
+    "/business-accounts/{business_account_id}/balance/top-up",
+    response_model=AdminActionResponse,
+)
+async def admin_top_up_business_balance(
+    business_account_id: UUID,
+    payload: ManualBusinessTopUpRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminActionResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    amount = _validate_admin_amount(payload.amount_usd, settings)
+    owner_telegram_ids: list[int] = []
+    notification_sent_count = 0
+    warnings: list[str] = []
+
+    async with session.begin():
+        mutation = await BusinessBalanceService(session).manual_topup_business_balance(
+            business_account_id=business_account_id,
+            amount_usd=amount,
+            reason=reason,
+            admin_note=f"admin={admin}",
+        )
+        if mutation.transaction is None:
+            raise AppError("Business top-up transaction was not created", code="topup_failed")
+        await session.refresh(mutation.account)
+        owner_telegram_ids = await _active_owner_telegram_ids(session, business_account_id)
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="business_balance_topup",
+            request=request,
+            target_type="business_account",
+            target_id=str(business_account_id),
+            metadata={"amount_usd": str(amount), "reason": reason},
+        )
+        account_name = mutation.account.name
+        available = mutation.account.available_usd
+        frozen = mutation.account.frozen_usd
+        transaction_id = mutation.transaction.id
+        audit_log_id = audit_log.id
+
+    for telegram_id in owner_telegram_ids:
+        message = (
+            "✅ Баланс компании пополнен\n\n"
+            f"Компания: {account_name}\n"
+            f"Зачислено: ${amount}\n"
+            f"Текущий баланс компании: ${available}"
+        )
+        sent, warning = await _send_telegram_notification(telegram_id=telegram_id, message=message)
+        if sent:
+            notification_sent_count += 1
+        if warning:
+            warnings.append(warning)
+
+    return AdminActionResponse(
+        success=True,
+        target_id=str(business_account_id),
+        action="business_balance_topup",
+        audit_log_id=audit_log_id,
+        transaction_id=transaction_id,
+        amount_usd=amount,
+        balance_available_usd=available,
+        balance_frozen_usd=frozen,
+        telegram_notification_sent=notification_sent_count > 0 if owner_telegram_ids else None,
+        warning="; ".join(warnings) if warnings else None,
+    )
+
+
+@router.post("/business-accounts/{business_account_id}/members", response_model=AdminActionResponse)
+async def admin_add_business_member(
+    business_account_id: UUID,
+    payload: BusinessMemberAddRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminActionResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    role = _validate_business_role(payload.role)
+    notification_sent = False
+    warning: str | None = None
+
+    async with session.begin():
+        account = await _get_active_business_account(session, business_account_id)
+        user = await _get_user_for_admin_member_payload(session, payload)
+        await _ensure_no_other_active_business_membership(session, user.id, business_account_id)
+        member = await _get_business_member_for_update(session, business_account_id, user.id)
+        old_state = "none" if member is None else ("active" if member.is_active else "inactive")
+        if member is None:
+            member = BusinessAccountMember(
+                business_account_id=business_account_id,
+                user_id=user.id,
+                role=role,
+                is_active=True,
+            )
+            session.add(member)
+        else:
+            member.role = role
+            member.is_active = True
+        await session.flush()
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="business_member_add",
+            request=request,
+            target_type="business_account_member",
+            target_id=str(member.id),
+            metadata={
+                "business_account_id": str(business_account_id),
+                "user_id": str(user.id),
+                "role": role,
+                "reason": reason,
+            },
+        )
+        telegram_id = user.telegram_id
+        account_name = account.name
+        member_id = member.id
+        audit_log_id = audit_log.id
+
+    notification_sent, warning = await _send_telegram_notification(
+        telegram_id=telegram_id,
+        message=(
+            "🏢 Вам подключён бизнес-баланс\n\n"
+            f"Компания: {account_name}\n"
+            "Теперь генерации будут оплачиваться с баланса компании."
+        ),
+    )
+    return AdminActionResponse(
+        success=True,
+        target_id=str(member_id),
+        action="business_member_add",
+        audit_log_id=audit_log_id,
+        old_state=old_state,
+        new_state="active",
+        telegram_notification_sent=notification_sent,
+        warning=warning,
+    )
+
+
+@router.post(
+    "/business-accounts/{business_account_id}/members/{user_id}/deactivate",
+    response_model=AdminActionResponse,
+)
+async def admin_deactivate_business_member(
+    business_account_id: UUID,
+    user_id: UUID,
+    payload: BusinessMemberRemoveRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminActionResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    notification_sent = False
+    warning: str | None = None
+
+    async with session.begin():
+        account = await _get_business_account(session, business_account_id)
+        user = await session.get(User, user_id)
+        if user is None:
+            raise AppError("User not found", code="user_not_found", status_code=404)
+        member = await _get_business_member_for_update(session, business_account_id, user_id)
+        if member is None:
+            raise AppError(
+                "Business member not found",
+                code="business_member_not_found",
+                status_code=404,
+            )
+        old_state = "active" if member.is_active else "inactive"
+        member.is_active = False
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="business_member_remove",
+            request=request,
+            target_type="business_account_member",
+            target_id=str(member.id),
+            metadata={
+                "business_account_id": str(business_account_id),
+                "user_id": str(user_id),
+                "reason": reason,
+            },
+        )
+        telegram_id = user.telegram_id
+        account_name = account.name
+        member_id = member.id
+        audit_log_id = audit_log.id
+
+    notification_sent, warning = await _send_telegram_notification(
+        telegram_id=telegram_id,
+        message=(
+            "🏢 Доступ к бизнес-балансу отключён\n\n"
+            f"Компания: {account_name}\n"
+            "Теперь генерации будут оплачиваться с личного баланса."
+        ),
+    )
+    return AdminActionResponse(
+        success=True,
+        target_id=str(member_id),
+        action="business_member_remove",
+        audit_log_id=audit_log_id,
+        old_state=old_state,
+        new_state="inactive",
+        telegram_notification_sent=notification_sent,
+        warning=warning,
+    )
+
+
+@router.post("/jobs/{job_id}/fail-refund", response_model=AdminActionResponse)
+async def admin_fail_refund_job(
+    job_id: UUID,
+    payload: FailRefundJobRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminActionResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    result = await _fail_generation_job_with_refund(
+        session=session,
+        job_id=job_id,
+        error_message=f"Generation cancelled by admin: {reason}",
+        notify=False,
+    )
+    notification_sent = False
+    warning: str | None = None
+
+    async with session.begin():
+        job_user = await _job_user_for_notification(session, job_id)
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="job_fail_refund",
+            request=request,
+            target_type="generation_job",
+            target_id=str(job_id),
+            metadata={
+                "reason": reason,
+                "old_status": result["old_status"],
+                "new_status": result["new_status"],
+                "refunded": result["refunded"],
+            },
+        )
+        audit_log_id = audit_log.id
+
+    if result["new_status"] == JobStatus.FAILED.value and job_user is not None:
+        notification_sent, warning = await _send_telegram_notification(
+            telegram_id=job_user.telegram_id,
+            message=(
+                "❌ Генерация отменена администратором\n\n"
+                "Средства возвращены на баланс.\n"
+                f"Причина: {reason}"
+            ),
+        )
+
+    return AdminActionResponse(
+        success=True,
+        target_id=str(job_id),
+        action="job_fail_refund",
+        audit_log_id=audit_log_id,
+        old_state=str(result["old_status"]),
+        new_state=str(result["new_status"]),
+        telegram_notification_sent=notification_sent,
+        warning=warning,
+    )
+
+
+@router.post("/jobs/retry-waiting", response_model=AdminActionResponse)
+async def admin_retry_waiting_jobs(
+    payload: RetryWaitingJobsRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> AdminActionResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    retry_result = await _retry_debug_waiting_jobs(
+        session=session,
+        statuses=[JobStatus.WAITING_FOR_GPU.value, JobStatus.WAITING_FOR_POD.value],
+        limit=limit,
+    )
+    async with session.begin():
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="retry_waiting_jobs",
+            request=request,
+            target_type="generation_jobs",
+            metadata={
+                "reason": reason,
+                "enqueued": retry_result.enqueued,
+                "job_ids": [str(job_id) for job_id in retry_result.job_ids],
+            },
+        )
+        audit_log_id = audit_log.id
+
+    return AdminActionResponse(
+        success=True,
+        target_id="waiting_generation_jobs",
+        action="retry_waiting_jobs",
+        audit_log_id=audit_log_id,
+        enqueued=retry_result.enqueued,
+        job_ids=retry_result.job_ids,
+    )
+
+
+@router.post("/runpod/pods/{runpod_pod_id}/terminate", response_model=AdminActionResponse)
+async def admin_terminate_runpod_pod(
+    runpod_pod_id: str,
+    payload: TerminateRunPodRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminActionResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    old_state: str | None = None
+    already_terminated = False
+
+    async with session.begin():
+        pod = await _get_runpod_pod_for_update(session, runpod_pod_id)
+        old_state = pod.status
+        if pod.status == PodStatus.BUSY.value or pod.active_job_id or pod.current_job_id:
+            raise AppError(
+                "Busy RunPod pods cannot be terminated from admin",
+                code="pod_busy",
+                status_code=409,
+            )
+        already_terminated = pod.status in {
+            PodStatus.TERMINATED.value,
+            PodStatus.DELETED.value,
+            PodStatus.STOPPING.value,
+        }
+
+    if not already_terminated:
+        try:
+            await anyio.to_thread.run_sync(lambda: _terminate_runpod_pod(settings, runpod_pod_id))
+        except RunPodError as exc:
+            if "HTTP 404" not in str(exc) and "not found" not in str(exc).lower():
+                raise AppError(str(exc), code="runpod_terminate_failed", status_code=502) from exc
+
+    async with session.begin():
+        pod = await _get_runpod_pod_for_update(session, runpod_pod_id)
+        now = datetime.now(UTC)
+        pod.status = PodStatus.TERMINATED.value
+        pod.active_job_id = None
+        pod.current_job_id = None
+        pod.terminated_at = pod.terminated_at or now
+        pod.updated_at = now
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="runpod_pod_terminate",
+            request=request,
+            target_type="runpod_pod",
+            target_id=runpod_pod_id,
+            metadata={
+                "reason": reason,
+                "old_status": old_state,
+                "already_terminated": already_terminated,
+            },
+        )
+        audit_log_id = audit_log.id
+
+    return AdminActionResponse(
+        success=True,
+        target_id=runpod_pod_id,
+        action="runpod_pod_terminate",
+        audit_log_id=audit_log_id,
+        old_state=old_state,
+        new_state=PodStatus.TERMINATED.value,
+    )
+
+
+@router.post("/users/{user_id}/block", response_model=AdminActionResponse)
+async def admin_block_user(
+    user_id: UUID,
+    payload: UserBlockRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminActionResponse:
+    return await _set_user_banned(
+        user_id=user_id,
+        is_banned=True,
+        payload=payload,
+        request=request,
+        session=session,
+        admin=admin,
+        settings=settings,
+    )
+
+
+@router.post("/users/{user_id}/unblock", response_model=AdminActionResponse)
+async def admin_unblock_user(
+    user_id: UUID,
+    payload: UserBlockRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminActionResponse:
+    return await _set_user_banned(
+        user_id=user_id,
+        is_banned=False,
+        payload=payload,
+        request=request,
+        session=session,
+        admin=admin,
+        settings=settings,
     )
 
 
@@ -703,6 +1205,208 @@ async def _count_anomalies(session: AsyncSession) -> int:
             pods_busy_without_job,
         ]
     )
+
+
+async def _get_business_account(
+    session: AsyncSession,
+    business_account_id: UUID,
+) -> BusinessAccount:
+    account = await session.get(BusinessAccount, business_account_id)
+    if account is None:
+        raise AppError(
+            "Business account not found",
+            code="business_account_not_found",
+            status_code=404,
+        )
+    return account
+
+
+async def _get_active_business_account(
+    session: AsyncSession,
+    business_account_id: UUID,
+) -> BusinessAccount:
+    account = await _get_business_account(session, business_account_id)
+    if account.status != BusinessAccountStatus.ACTIVE.value:
+        raise AppError(
+            "Business account is not active",
+            code="business_account_inactive",
+            status_code=400,
+        )
+    return account
+
+
+async def _get_user_for_admin_member_payload(
+    session: AsyncSession,
+    payload: BusinessMemberAddRequest,
+) -> User:
+    if payload.user_id is not None:
+        user = await session.get(User, payload.user_id)
+    elif payload.telegram_id is not None:
+        result = await session.execute(select(User).where(User.telegram_id == payload.telegram_id))
+        user = result.scalar_one_or_none()
+    else:
+        raise AppError("telegram_id or user_id is required", code="member_user_required")
+    if user is None:
+        raise AppError("User not found", code="user_not_found", status_code=404)
+    return user
+
+
+async def _ensure_no_other_active_business_membership(
+    session: AsyncSession,
+    user_id: UUID,
+    business_account_id: UUID,
+) -> None:
+    result = await session.execute(
+        select(BusinessAccountMember)
+        .join(BusinessAccount, BusinessAccount.id == BusinessAccountMember.business_account_id)
+        .where(
+            BusinessAccountMember.user_id == user_id,
+            BusinessAccountMember.business_account_id != business_account_id,
+            BusinessAccountMember.is_active.is_(True),
+            BusinessAccount.status == BusinessAccountStatus.ACTIVE.value,
+        )
+        .limit(1)
+    )
+    if result.scalar_one_or_none() is not None:
+        raise AppError(
+            "User already has an active business account",
+            code="business_member_already_active",
+            status_code=400,
+        )
+
+
+async def _get_business_member_for_update(
+    session: AsyncSession,
+    business_account_id: UUID,
+    user_id: UUID,
+) -> BusinessAccountMember | None:
+    result = await session.execute(
+        select(BusinessAccountMember)
+        .where(
+            BusinessAccountMember.business_account_id == business_account_id,
+            BusinessAccountMember.user_id == user_id,
+        )
+        .with_for_update()
+    )
+    return result.scalar_one_or_none()
+
+
+async def _active_owner_telegram_ids(
+    session: AsyncSession,
+    business_account_id: UUID,
+) -> list[int]:
+    result = await session.execute(
+        select(User.telegram_id)
+        .join(BusinessAccountMember, BusinessAccountMember.user_id == User.id)
+        .where(
+            BusinessAccountMember.business_account_id == business_account_id,
+            BusinessAccountMember.role == BusinessAccountMemberRole.OWNER.value,
+            BusinessAccountMember.is_active.is_(True),
+        )
+    )
+    return [int(item) for item in result.scalars()]
+
+
+async def _job_user_for_notification(session: AsyncSession, job_id: UUID) -> User | None:
+    result = await session.execute(
+        select(User)
+        .join(GenerationJob, GenerationJob.user_id == User.id)
+        .where(GenerationJob.id == job_id)
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _get_runpod_pod_for_update(session: AsyncSession, runpod_pod_id: str) -> RunpodPod:
+    result = await session.execute(
+        select(RunpodPod).where(RunpodPod.runpod_pod_id == runpod_pod_id).with_for_update()
+    )
+    pod = result.scalar_one_or_none()
+    if pod is None:
+        raise AppError("RunPod pod not found", code="runpod_pod_not_found", status_code=404)
+    return pod
+
+
+async def _set_user_banned(
+    *,
+    user_id: UUID,
+    is_banned: bool,
+    payload: UserBlockRequest,
+    request: Request,
+    session: AsyncSession,
+    admin: AdminPrincipal,
+    settings: Settings,
+) -> AdminActionResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    async with session.begin():
+        user = await session.get(User, user_id, with_for_update=True)
+        if user is None:
+            raise AppError("User not found", code="user_not_found", status_code=404)
+        old_state = "blocked" if user.is_banned else "active"
+        user.is_banned = is_banned
+        action = "user_block" if is_banned else "user_unblock"
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action=action,
+            request=request,
+            target_type="user",
+            target_id=str(user_id),
+            metadata={"reason": reason},
+        )
+        audit_log_id = audit_log.id
+    return AdminActionResponse(
+        success=True,
+        target_id=str(user_id),
+        action=action,
+        audit_log_id=audit_log_id,
+        old_state=old_state,
+        new_state="blocked" if is_banned else "active",
+    )
+
+
+async def _send_telegram_notification(
+    *,
+    telegram_id: int,
+    message: str,
+) -> tuple[bool, str | None]:
+    try:
+        sent = await TelegramNotificationService().send_message(
+            telegram_id=telegram_id,
+            message=message,
+        )
+        return sent, None if sent else "Telegram returned ok=false"
+    except Exception as exc:
+        return False, f"Telegram notification failed: {exc.__class__.__name__}"
+
+
+def _validate_action_reason(reason: str, settings: Settings) -> str:
+    normalized = reason.strip()
+    if settings.admin_require_action_reason and not normalized:
+        raise AppError("Action reason is required", code="admin_reason_required", status_code=400)
+    return normalized or "admin action"
+
+
+def _validate_admin_amount(amount: Decimal, settings: Settings) -> Decimal:
+    normalized = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    if normalized <= Decimal("0"):
+        raise AppError("Amount must be positive", code="invalid_amount", status_code=400)
+    if normalized > settings.admin_max_manual_topup_usd:
+        raise AppError(
+            f"Amount exceeds admin limit ${settings.admin_max_manual_topup_usd}",
+            code="admin_amount_limit_exceeded",
+            status_code=400,
+        )
+    return normalized
+
+
+def _validate_business_role(role: str) -> str:
+    normalized = role.strip().lower()
+    if normalized not in {
+        BusinessAccountMemberRole.OWNER.value,
+        BusinessAccountMemberRole.MEMBER.value,
+    }:
+        raise AppError("Unsupported business member role", code="invalid_business_role")
+    return normalized
 
 
 def _admin_audit_log_item(log: AdminAuditLog) -> AdminAuditLogItem:

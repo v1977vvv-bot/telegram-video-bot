@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.balance_account import BalanceAccount
+from backend.app.models.balance_transaction import BalanceTransaction
 from backend.app.repositories.balances import BalanceRepository
 from shared.app.enums import BalanceTransactionType
 from shared.app.exceptions import AppError
@@ -66,6 +67,27 @@ class BalanceService:
             reason=reason,
         )
         return account
+
+    async def admin_adjustment_balance_in_transaction(
+        self,
+        user_id: UUID,
+        amount_usd: Decimal,
+        reason: str,
+    ) -> tuple[BalanceAccount, BalanceTransaction]:
+        amount = self._normalize_positive_amount(amount_usd)
+        account = await self._get_or_create_locked_account(user_id)
+        account.available_usd = self._money(account.available_usd + amount)
+        transaction = self._repository.add_transaction(
+            self._session,
+            user_id=user_id,
+            transaction_type=BalanceTransactionType.ADMIN_ADJUSTMENT.value,
+            amount_usd=amount,
+            balance_available_after=account.available_usd,
+            balance_frozen_after=account.frozen_usd,
+            reason=reason,
+        )
+        await self._session.flush()
+        return account, transaction
 
     async def freeze_balance(
         self,

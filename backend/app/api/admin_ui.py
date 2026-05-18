@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse, HTMLResponse
 
 from backend.app.core.admin_auth import AdminPrincipal, require_admin_auth
+from shared.app.config import get_settings
 
 router = APIRouter(prefix="/admin", tags=["admin-ui"])
 AdminDep = Annotated[AdminPrincipal, Depends(require_admin_auth)]
@@ -67,6 +68,7 @@ async def admin_audit(_: AdminDep) -> HTMLResponse:
 
 def _admin_page(page: str) -> HTMLResponse:
     title, endpoint = PAGES[page]
+    actions_enabled = "true" if get_settings().admin_actions_enabled else "false"
     nav = "\n".join(
         f'<a class="{"active" if key == page else ""}" href="{href}">{label}</a>'
         for key, (label, _endpoint) in PAGES.items()
@@ -89,16 +91,22 @@ def _admin_page(page: str) -> HTMLResponse:
   <main>
     <header>
       <div>
-        <p class="eyebrow">Read-only admin panel</p>
+        <p class="eyebrow">Admin operator panel</p>
         <h2>{title}</h2>
       </div>
       <button id="refresh" type="button">Refresh</button>
     </header>
+    <section id="actions" class="panel actions"></section>
+    <p id="action-status" class="action-status"></p>
     <section id="content" class="panel">Loading...</section>
   </main>
   <script>
+    const page = {page!r};
     const endpoint = {endpoint!r};
+    const actionsEnabled = {actions_enabled};
     const content = document.getElementById("content");
+    const actions = document.getElementById("actions");
+    const actionStatus = document.getElementById("action-status");
     const refresh = document.getElementById("refresh");
 
     function escapeHtml(value) {{
@@ -151,6 +159,138 @@ def _admin_page(page: str) -> HTMLResponse:
       return `<table class="kv"><tbody>${{rows}}</tbody></table>`;
     }}
 
+    function renderActions() {{
+      if (!actionsEnabled) {{
+        actions.innerHTML = '<p class="muted">Admin actions are disabled.</p>';
+        return;
+      }}
+      const forms = {{
+        overview: `
+          <h3>Queue controls</h3>
+          <form class="action-form" data-action="retry_waiting">
+            <input name="reason" placeholder="Reason" required>
+            <button type="submit">Retry waiting jobs</button>
+          </form>`,
+        users: `
+          <h3>User controls</h3>
+          <form class="action-form" data-action="personal_topup">
+            <input name="user_id" placeholder="User UUID" required>
+            <input name="amount_usd" placeholder="Amount USD" required>
+            <input name="reason" placeholder="Reason" required>
+            <button type="submit">Top up personal balance</button>
+          </form>
+          <form class="action-form" data-action="user_block">
+            <input name="user_id" placeholder="User UUID" required>
+            <input name="reason" placeholder="Reason" required>
+            <button type="submit">Block user</button>
+          </form>
+          <form class="action-form" data-action="user_unblock">
+            <input name="user_id" placeholder="User UUID" required>
+            <input name="reason" placeholder="Reason" required>
+            <button type="submit">Unblock user</button>
+          </form>`,
+        jobs: `
+          <h3>Job controls</h3>
+          <form class="action-form" data-action="fail_refund">
+            <input name="job_id" placeholder="Job UUID" required>
+            <input name="reason" placeholder="Reason" required>
+            <button type="submit">Fail and refund job</button>
+          </form>`,
+        runpod: `
+          <h3>RunPod controls</h3>
+          <form class="action-form" data-action="terminate_pod">
+            <input name="runpod_pod_id" placeholder="RunPod pod id" required>
+            <input name="reason" placeholder="Reason" required>
+            <button type="submit">Terminate pod</button>
+          </form>`,
+        business: `
+          <h3>Business controls</h3>
+          <form class="action-form" data-action="business_topup">
+            <input name="business_account_id" placeholder="Business account UUID" required>
+            <input name="amount_usd" placeholder="Amount USD" required>
+            <input name="reason" placeholder="Reason" required>
+            <button type="submit">Top up business balance</button>
+          </form>
+          <form class="action-form" data-action="business_add_member">
+            <input name="business_account_id" placeholder="Business account UUID" required>
+            <input name="telegram_id" placeholder="Telegram ID">
+            <input name="user_id" placeholder="User UUID">
+            <select name="role">
+              <option value="member">member</option>
+              <option value="owner">owner</option>
+            </select>
+            <input name="reason" placeholder="Reason" required>
+            <button type="submit">Add member</button>
+          </form>
+          <form class="action-form" data-action="business_remove_member">
+            <input name="business_account_id" placeholder="Business account UUID" required>
+            <input name="user_id" placeholder="User UUID" required>
+            <input name="reason" placeholder="Reason" required>
+            <button type="submit">Deactivate member</button>
+          </form>`,
+      }};
+      actions.innerHTML = forms[page] || '<p class="muted">No actions for this page.</p>';
+    }}
+
+    function formObject(form) {{
+      const data = Object.fromEntries(new FormData(form).entries());
+      Object.keys(data).forEach(key => {{
+        if (data[key] === "") delete data[key];
+      }});
+      return data;
+    }}
+
+    async function submitAction(event) {{
+      event.preventDefault();
+      const form = event.target;
+      const data = formObject(form);
+      let path = "";
+      let body = {{ reason: data.reason }};
+      if (form.dataset.action === "retry_waiting") {{
+        path = "/api/v1/admin/jobs/retry-waiting";
+      }} else if (form.dataset.action === "personal_topup") {{
+        path = `/api/v1/admin/users/${{data.user_id}}/balance/top-up`;
+        body.amount_usd = data.amount_usd;
+      }} else if (form.dataset.action === "user_block") {{
+        path = `/api/v1/admin/users/${{data.user_id}}/block`;
+      }} else if (form.dataset.action === "user_unblock") {{
+        path = `/api/v1/admin/users/${{data.user_id}}/unblock`;
+      }} else if (form.dataset.action === "fail_refund") {{
+        path = `/api/v1/admin/jobs/${{data.job_id}}/fail-refund`;
+      }} else if (form.dataset.action === "terminate_pod") {{
+        path = `/api/v1/admin/runpod/pods/${{data.runpod_pod_id}}/terminate`;
+      }} else if (form.dataset.action === "business_topup") {{
+        path = `/api/v1/admin/business-accounts/${{data.business_account_id}}/balance/top-up`;
+        body.amount_usd = data.amount_usd;
+      }} else if (form.dataset.action === "business_add_member") {{
+        path = `/api/v1/admin/business-accounts/${{data.business_account_id}}/members`;
+        body.telegram_id = data.telegram_id ? Number(data.telegram_id) : undefined;
+        body.user_id = data.user_id;
+        body.role = data.role || "member";
+      }} else if (form.dataset.action === "business_remove_member") {{
+        path = `/api/v1/admin/business-accounts/${{data.business_account_id}}`
+          + `/members/${{data.user_id}}/deactivate`;
+      }}
+      actionStatus.textContent = "Submitting...";
+      try {{
+        const response = await fetch(path, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          credentials: "same-origin",
+          body: JSON.stringify(body),
+        }});
+        const result = await response.json();
+        if (!response.ok) {{
+          throw new Error(result.detail || result?.error?.message || `HTTP ${{response.status}}`);
+        }}
+        actionStatus.textContent = `Success: ${{JSON.stringify(result)}}`;
+        form.reset();
+        await load();
+      }} catch (error) {{
+        actionStatus.textContent = `Error: ${{error.message}}`;
+      }}
+    }}
+
     async function load() {{
       content.innerHTML = '<p class="muted">Loading...</p>';
       try {{
@@ -164,6 +304,10 @@ def _admin_page(page: str) -> HTMLResponse:
     }}
 
     refresh.addEventListener("click", load);
+    document.addEventListener("submit", event => {{
+      if (event.target.classList.contains("action-form")) submitAction(event);
+    }});
+    renderActions();
     load();
   </script>
 </body>

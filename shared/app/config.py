@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     admin_session_cookie_name: str = "admin_session"
     admin_session_secret: str = ""
     admin_session_ttl_seconds: int = 86400
+    admin_actions_enabled: bool = False
+    admin_max_manual_topup_usd: Decimal = Field(default=Decimal("500"))
+    admin_require_action_reason: bool = True
 
     postgres_host: str = "postgres"
     postgres_port: int = 5432
