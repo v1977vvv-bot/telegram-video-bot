@@ -1,3 +1,4 @@
+from backend.app.models.admin_audit_log import AdminAuditLog
 from backend.app.models.balance_account import BalanceAccount
 from backend.app.models.balance_transaction import BalanceTransaction
 from backend.app.models.business_account import BusinessAccount
@@ -13,6 +14,7 @@ from backend.app.models.user import User
 __all__ = [
     "BalanceAccount",
     "BalanceTransaction",
+    "AdminAuditLog",
     "BusinessAccount",
     "BusinessAccountMember",
     "BusinessBalanceTransaction",

@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     debug_endpoints_enabled: bool = True
     debug_endpoints_local_only: bool = True
+    admin_panel_enabled: bool = False
+    admin_basic_auth_enabled: bool = True
+    admin_basic_auth_username: str = "admin"
+    admin_basic_auth_password: str = ""
+    admin_session_cookie_name: str = "admin_session"
+    admin_session_secret: str = ""
+    admin_session_ttl_seconds: int = 86400
 
     postgres_host: str = "postgres"
     postgres_port: int = 5432

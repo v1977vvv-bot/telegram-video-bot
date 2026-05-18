@@ -78,6 +78,7 @@ def build_config_sanity_result(settings: Settings) -> ConfigSanityResult:
         _require_storage_config(result, settings)
         _require_payment_package_config(result, settings)
         _require_runpod_cost_config(result, settings)
+        _require_admin_config(result, settings)
         _require_production_safety_defaults(result, settings)
     else:
         _warn_if_placeholder(result, "TELEGRAM_BOT_TOKEN", settings.telegram_bot_token)
@@ -86,6 +87,7 @@ def build_config_sanity_result(settings: Settings) -> ConfigSanityResult:
         _warn_if_storage_incomplete(result, settings)
         _warn_if_payment_package_config_invalid(result, settings)
         _warn_if_runpod_cost_config_invalid(result, settings)
+        _warn_if_admin_config_invalid(result, settings)
 
     _warn_for_launch_risky_values(result, settings)
     return result
@@ -181,6 +183,22 @@ def _require_runpod_cost_config(result: ConfigSanityResult, settings: Settings) 
         result.errors.append(error)
 
 
+def _require_admin_config(result: ConfigSanityResult, settings: Settings) -> None:
+    if not settings.admin_panel_enabled:
+        return
+    if not settings.admin_basic_auth_enabled:
+        result.errors.append("ADMIN_BASIC_AUTH_ENABLED must be true when admin panel is enabled")
+    if _is_placeholder(settings.admin_basic_auth_username):
+        result.errors.append(
+            "ADMIN_BASIC_AUTH_USERNAME must be configured when admin panel is enabled"
+        )
+    password = settings.admin_basic_auth_password
+    if _is_placeholder(password) or len(password) < 12:
+        result.errors.append(
+            "ADMIN_BASIC_AUTH_PASSWORD must be configured and at least 12 characters"
+        )
+
+
 def _warn_if_payment_package_config_invalid(
     result: ConfigSanityResult,
     settings: Settings,
@@ -197,6 +215,19 @@ def _warn_if_runpod_cost_config_invalid(
 ) -> None:
     for error in _runpod_cost_config_errors(settings):
         result.warnings.append(error)
+
+
+def _warn_if_admin_config_invalid(result: ConfigSanityResult, settings: Settings) -> None:
+    if not settings.admin_panel_enabled:
+        return
+    if not settings.admin_basic_auth_enabled:
+        result.warnings.append("ADMIN_BASIC_AUTH_ENABLED=false while admin panel is enabled")
+    if _is_placeholder(settings.admin_basic_auth_username):
+        result.warnings.append("ADMIN_BASIC_AUTH_USERNAME is not configured")
+    if _is_placeholder(settings.admin_basic_auth_password):
+        result.warnings.append("ADMIN_BASIC_AUTH_PASSWORD is not configured")
+    elif len(settings.admin_basic_auth_password) < 12:
+        result.warnings.append("ADMIN_BASIC_AUTH_PASSWORD is shorter than 12 characters")
 
 
 def _runpod_cost_config_errors(settings: Settings) -> list[str]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from backend.app.api.v1.admin import router as admin_router
 from backend.app.api.v1.business_debug import router as business_debug_router
 from backend.app.api.v1.debug import router as debug_router
 from backend.app.api.v1.files import router as files_router
@@ -16,6 +17,7 @@ from backend.app.api.v1.users import router as users_router
 api_router = APIRouter()
 api_router.include_router(health_router)
 api_router.include_router(ops_router)
+api_router.include_router(admin_router)
 api_router.include_router(settings_router)
 api_router.include_router(payments_router)
 api_router.include_router(debug_router)

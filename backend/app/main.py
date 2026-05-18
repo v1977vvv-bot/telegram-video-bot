@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.app.api.admin_ui import router as admin_ui_router
 from backend.app.api.v1.router import api_router
 from backend.app.core.config_sanity import validate_startup_config
 from backend.app.core.cors import parse_cors_origins
@@ -58,3 +59,4 @@ async def root_health() -> HealthResponse:
 
 
 app.include_router(api_router, prefix="/api/v1")
+app.include_router(admin_ui_router)

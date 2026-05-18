@@ -186,6 +186,66 @@ Telegram statistics show company balance when a user has an active business acco
 The top-up menu remains the personal Cryptomus package flow; users with business
 balance see a note that company top-ups are handled through support.
 
+## Admin panel MVP
+
+Stage 11.1 adds a read-only operator dashboard and read-only admin API. It is disabled
+by default and uses HTTP Basic Auth for the MVP. Debug endpoints remain separate and
+unchanged.
+
+Local enablement:
+
+```env
+ADMIN_PANEL_ENABLED=true
+ADMIN_BASIC_AUTH_ENABLED=true
+ADMIN_BASIC_AUTH_USERNAME=admin
+ADMIN_BASIC_AUTH_PASSWORD=replace_with_a_strong_password
+ADMIN_SESSION_COOKIE_NAME=admin_session
+ADMIN_SESSION_SECRET=
+ADMIN_SESSION_TTL_SECONDS=86400
+```
+
+Open:
+
+```text
+http://localhost:8000/admin
+```
+
+Read-only API endpoints:
+
+```bash
+curl -u admin:replace_with_a_strong_password http://localhost:8000/api/v1/admin/overview
+curl -u admin:replace_with_a_strong_password http://localhost:8000/api/v1/admin/users
+curl -u admin:replace_with_a_strong_password http://localhost:8000/api/v1/admin/jobs
+curl -u admin:replace_with_a_strong_password http://localhost:8000/api/v1/admin/payments
+curl -u admin:replace_with_a_strong_password http://localhost:8000/api/v1/admin/runpod/pods
+curl -u admin:replace_with_a_strong_password \
+  http://localhost:8000/api/v1/admin/business-accounts
+curl -u admin:replace_with_a_strong_password http://localhost:8000/api/v1/admin/audit-logs
+```
+
+Pages:
+
+- `/admin` overview
+- `/admin/users`
+- `/admin/jobs`
+- `/admin/payments`
+- `/admin/runpod`
+- `/admin/business`
+- `/admin/audit`
+
+Stage 11.1 does not expose destructive buttons or write actions. Manual top-up,
+fail-refund, RunPod termination, and other operator actions remain available only
+through existing protected local debug endpoints until Stage 11.2.
+
+Production safety:
+
+- Do not enable the admin panel without HTTPS.
+- Use a strong Basic Auth password, at least 12 characters.
+- Prefer an IP allowlist or private reverse-proxy path in addition to Basic Auth.
+- Keep `DEBUG_ENDPOINTS_ENABLED=false` in production.
+- If `APP_ENV=production` and `ADMIN_PANEL_ENABLED=true`, startup sanity checks require
+  configured admin credentials.
+
 ## ComfyUI configuration
 
 `GENERATION_MODE=mock` keeps generation local to the worker stub and does not call ComfyUI.
@@ -982,6 +1042,8 @@ Pre-launch environment:
 - Create `.env.production` from `.env.production.example`.
 - Set `APP_ENV=production`.
 - Set `DEBUG_ENDPOINTS_ENABLED=false`.
+- Keep `ADMIN_PANEL_ENABLED=false` until HTTPS and strong admin credentials are ready.
+  If enabled, set `ADMIN_BASIC_AUTH_PASSWORD` to a strong secret.
 - Set real `TELEGRAM_BOT_TOKEN`, `CRYPTOMUS_*`, `RUNPOD_API_KEY`,
   `RUNPOD_TEMPLATE_ID`, PostgreSQL, Redis, and `CLOUDFLARE_R2_*` values.
 - Keep `DISTRIBUTED_SEGMENT_GENERATION_ENABLED=false` for MVP launch.
