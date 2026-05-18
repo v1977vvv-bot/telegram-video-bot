@@ -223,6 +223,14 @@ curl -u admin:replace_with_a_strong_password http://localhost:8000/api/v1/admin/
 curl -u admin:replace_with_a_strong_password http://localhost:8000/api/v1/admin/runpod/pods
 curl -u admin:replace_with_a_strong_password \
   http://localhost:8000/api/v1/admin/business-accounts
+curl -u admin:replace_with_a_strong_password \
+  "http://localhost:8000/api/v1/admin/reports/finance/summary"
+curl -u admin:replace_with_a_strong_password \
+  "http://localhost:8000/api/v1/admin/reports/finance/daily"
+curl -u admin:replace_with_a_strong_password \
+  "http://localhost:8000/api/v1/admin/reports/users/spending"
+curl -u admin:replace_with_a_strong_password \
+  "http://localhost:8000/api/v1/admin/reports/business/spending"
 curl -u admin:replace_with_a_strong_password http://localhost:8000/api/v1/admin/audit-logs
 ```
 
@@ -234,6 +242,9 @@ Pages:
 - `/admin/payments`
 - `/admin/runpod`
 - `/admin/business`
+- `/admin/reports`
+- `/admin/reports/users`
+- `/admin/reports/business`
 - `/admin/audit`
 
 Stage 11.1 does not expose destructive buttons or write actions. Manual top-up,
@@ -294,6 +305,57 @@ Every admin action requires Basic Auth, `ADMIN_PANEL_ENABLED=true`,
 Actions write `admin_audit_logs`. Balance changes always go through balance ledger
 transactions. Telegram notifications are attempted for top-ups, business membership
 changes, and fail-refund, but notification failure does not roll back the action.
+
+Admin finance reports:
+
+- `/api/v1/admin/reports/finance/summary` returns totals for the selected period.
+- `/api/v1/admin/reports/finance/daily` groups top-ups, revenue, refunds, RunPod
+  estimated cost, gross margin, completed jobs, failed jobs, and new users by day.
+- `/api/v1/admin/reports/users/spending` groups personal and business generation
+  spend by day and user. Business spend is attributed to the Telegram user who ran
+  the generation, but business top-ups are reported on the business report to avoid
+  double-counting.
+- `/api/v1/admin/reports/business/spending` groups business top-ups and business
+  generation spend by day, account, and generating user.
+
+Report filters:
+
+- `date_from=YYYY-MM-DD` and `date_to=YYYY-MM-DD`; defaults to current month to date.
+- `billing_account_type=personal|business|all`.
+- `user_id`, `telegram_id`, and `business_account_id` where supported.
+
+Definitions:
+
+- `payment_topups_usd`: successful Cryptomus package payments.
+- `manual_personal_topups_usd`: admin/manual personal balance adjustments.
+- `manual_business_topups_usd`: manual business account top-ups.
+- `captured_revenue_usd`: completed generation job revenue with a capture ledger
+  transaction.
+- `refunded_usd`: refund/release ledger transactions for generation jobs.
+- `estimated_runpod_cost_usd`: sum of `generation_jobs.cost_usd`; old jobs with null
+  cost count as zero in report totals.
+- `gross_margin_usd`: `captured_revenue_usd - estimated_runpod_cost_usd`.
+- `gross_margin_percent`: gross margin divided by captured revenue; null when revenue
+  is zero.
+
+CSV exports:
+
+```bash
+curl -u admin:replace_with_a_strong_password \
+  "http://localhost:8000/api/v1/admin/reports/finance/daily.csv?date_from=2026-05-01&date_to=2026-05-31" \
+  -o finance_daily_may.csv
+
+curl -u admin:replace_with_a_strong_password \
+  "http://localhost:8000/api/v1/admin/reports/users/spending.csv?date_from=2026-05-01&date_to=2026-05-31" \
+  -o user_spending_may.csv
+
+curl -u admin:replace_with_a_strong_password \
+  "http://localhost:8000/api/v1/admin/reports/business/spending.csv?date_from=2026-05-01&date_to=2026-05-31" \
+  -o business_spending_may.csv
+```
+
+`cost_usd` is an estimate from configured RunPod hourly prices, not official RunPod
+billing. Finance reports are read-only and do not require `ADMIN_ACTIONS_ENABLED`.
 
 Production safety:
 

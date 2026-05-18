@@ -110,6 +110,32 @@ button:hover {
   align-items: center;
 }
 
+.filter-form {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(130px, 1fr)) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #172033;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.button-link:hover {
+  border-color: #64748b;
+}
+
 input,
 select {
   width: 100%;
@@ -177,6 +203,10 @@ th {
   }
 
   .action-form {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-form {
     grid-template-columns: 1fr;
   }
 

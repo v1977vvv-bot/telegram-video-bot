@@ -14,13 +14,24 @@ AdminDep = Annotated[AdminPrincipal, Depends(require_admin_auth)]
 
 
 PAGES = {
-    "overview": ("Overview", "/api/v1/admin/overview"),
-    "users": ("Users", "/api/v1/admin/users"),
-    "jobs": ("Jobs", "/api/v1/admin/jobs"),
-    "payments": ("Payments", "/api/v1/admin/payments"),
-    "runpod": ("RunPod", "/api/v1/admin/runpod/pods"),
-    "business": ("Business Accounts", "/api/v1/admin/business-accounts"),
-    "audit": ("Audit Logs", "/api/v1/admin/audit-logs"),
+    "overview": ("Overview", "/api/v1/admin/overview", "/admin"),
+    "users": ("Users", "/api/v1/admin/users", "/admin/users"),
+    "jobs": ("Jobs", "/api/v1/admin/jobs", "/admin/jobs"),
+    "payments": ("Payments", "/api/v1/admin/payments", "/admin/payments"),
+    "runpod": ("RunPod", "/api/v1/admin/runpod/pods", "/admin/runpod"),
+    "business": ("Business Accounts", "/api/v1/admin/business-accounts", "/admin/business"),
+    "reports": ("Reports", "/api/v1/admin/reports/finance/daily", "/admin/reports"),
+    "reports_users": (
+        "User Spending",
+        "/api/v1/admin/reports/users/spending",
+        "/admin/reports/users",
+    ),
+    "reports_business": (
+        "Business Spending",
+        "/api/v1/admin/reports/business/spending",
+        "/admin/reports/business",
+    ),
+    "audit": ("Audit Logs", "/api/v1/admin/audit-logs", "/admin/audit"),
 }
 ADMIN_CSS_PATH = Path(__file__).resolve().parents[1] / "static" / "admin.css"
 
@@ -66,13 +77,27 @@ async def admin_audit(_: AdminDep) -> HTMLResponse:
     return _admin_page("audit")
 
 
+@router.get("/reports", response_class=HTMLResponse)
+async def admin_reports(_: AdminDep) -> HTMLResponse:
+    return _admin_page("reports")
+
+
+@router.get("/reports/users", response_class=HTMLResponse)
+async def admin_user_reports(_: AdminDep) -> HTMLResponse:
+    return _admin_page("reports_users")
+
+
+@router.get("/reports/business", response_class=HTMLResponse)
+async def admin_business_reports(_: AdminDep) -> HTMLResponse:
+    return _admin_page("reports_business")
+
+
 def _admin_page(page: str) -> HTMLResponse:
-    title, endpoint = PAGES[page]
+    title, endpoint, _href = PAGES[page]
     actions_enabled = "true" if get_settings().admin_actions_enabled else "false"
     nav = "\n".join(
         f'<a class="{"active" if key == page else ""}" href="{href}">{label}</a>'
-        for key, (label, _endpoint) in PAGES.items()
-        for href in ["/admin" if key == "overview" else f"/admin/{key}"]
+        for key, (label, _endpoint, href) in PAGES.items()
     )
     return HTMLResponse(
         f"""<!doctype html>
@@ -104,6 +129,7 @@ def _admin_page(page: str) -> HTMLResponse:
     const page = {page!r};
     const endpoint = {endpoint!r};
     const actionsEnabled = {actions_enabled};
+    const reportPages = new Set(["reports", "reports_users", "reports_business"]);
     const content = document.getElementById("content");
     const actions = document.getElementById("actions");
     const actionStatus = document.getElementById("action-status");
@@ -160,6 +186,43 @@ def _admin_page(page: str) -> HTMLResponse:
     }}
 
     function renderActions() {{
+      if (reportPages.has(page)) {{
+        const billingSelect = `
+          <select name="billing_account_type">
+            <option value="all">all billing</option>
+            <option value="personal">personal</option>
+            <option value="business">business</option>
+          </select>`;
+        let extra = "";
+        let csvPath = "/api/v1/admin/reports/finance/daily.csv";
+        if (page === "reports") {{
+          extra = `${{billingSelect}}
+            <input name="user_id" placeholder="User UUID">
+            <input name="business_account_id" placeholder="Business account UUID">`;
+        }} else if (page === "reports_users") {{
+          csvPath = "/api/v1/admin/reports/users/spending.csv";
+          extra = `${{billingSelect}}
+            <input name="user_id" placeholder="User UUID">
+            <input name="telegram_id" placeholder="Telegram ID">
+            <input name="limit" placeholder="Limit" value="100">`;
+        }} else {{
+          csvPath = "/api/v1/admin/reports/business/spending.csv";
+          extra = `
+            <input name="business_account_id" placeholder="Business account UUID">
+            <input name="user_id" placeholder="User UUID">
+            <input name="limit" placeholder="Limit" value="100">`;
+        }}
+        actions.innerHTML = `
+          <h3>Filters</h3>
+          <form id="report-filter" class="filter-form">
+            <input name="date_from" type="date">
+            <input name="date_to" type="date">
+            ${{extra}}
+            <button type="submit">Apply</button>
+            <a id="csv-export" class="button-link" href="${{csvPath}}">Download CSV</a>
+          </form>`;
+        return;
+      }}
       if (!actionsEnabled) {{
         actions.innerHTML = '<p class="muted">Admin actions are disabled.</p>';
         return;
@@ -232,6 +295,29 @@ def _admin_page(page: str) -> HTMLResponse:
       actions.innerHTML = forms[page] || '<p class="muted">No actions for this page.</p>';
     }}
 
+    function reportQuery() {{
+      if (!reportPages.has(page)) return "";
+      const form = document.getElementById("report-filter");
+      if (!form) return "";
+      const params = new URLSearchParams();
+      for (const [key, value] of new FormData(form).entries()) {{
+        if (value !== "") params.set(key, value);
+      }}
+      const query = params.toString();
+      return query ? `?${{query}}` : "";
+    }}
+
+    function updateCsvLink(query) {{
+      const link = document.getElementById("csv-export");
+      if (!link) return;
+      const base = page === "reports"
+        ? "/api/v1/admin/reports/finance/daily.csv"
+        : page === "reports_users"
+          ? "/api/v1/admin/reports/users/spending.csv"
+          : "/api/v1/admin/reports/business/spending.csv";
+      link.href = `${{base}}${{query}}`;
+    }}
+
     function formObject(form) {{
       const data = Object.fromEntries(new FormData(form).entries());
       Object.keys(data).forEach(key => {{
@@ -294,7 +380,25 @@ def _admin_page(page: str) -> HTMLResponse:
     async function load() {{
       content.innerHTML = '<p class="muted">Loading...</p>';
       try {{
-        const response = await fetch(endpoint, {{ credentials: "same-origin" }});
+        const query = reportQuery();
+        updateCsvLink(query);
+        if (page === "reports") {{
+          const [summaryResponse, dailyResponse] = await Promise.all([
+            fetch(
+              `/api/v1/admin/reports/finance/summary${{query}}`,
+              {{ credentials: "same-origin" }},
+            ),
+            fetch(`${{endpoint}}${{query}}`, {{ credentials: "same-origin" }}),
+          ]);
+          if (!summaryResponse.ok) throw new Error(`Summary HTTP ${{summaryResponse.status}}`);
+          if (!dailyResponse.ok) throw new Error(`Daily HTTP ${{dailyResponse.status}}`);
+          const summary = await summaryResponse.json();
+          const daily = await dailyResponse.json();
+          content.innerHTML = `<h3>Summary</h3>${{render(summary.totals)}}`
+            + `<h3>Daily</h3>${{renderTable(daily.items || [])}}`;
+          return;
+        }}
+        const response = await fetch(`${{endpoint}}${{query}}`, {{ credentials: "same-origin" }});
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const data = await response.json();
         content.innerHTML = render(data);
@@ -306,6 +410,10 @@ def _admin_page(page: str) -> HTMLResponse:
     refresh.addEventListener("click", load);
     document.addEventListener("submit", event => {{
       if (event.target.classList.contains("action-form")) submitAction(event);
+      if (event.target.id === "report-filter") {{
+        event.preventDefault();
+        load();
+      }}
     }});
     renderActions();
     load();
