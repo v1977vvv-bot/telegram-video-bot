@@ -65,6 +65,30 @@ class BalanceTransactionType(StrEnum):
     RELEASE = "release"
 
 
+class BillingAccountType(StrEnum):
+    PERSONAL = "personal"
+    BUSINESS = "business"
+
+
+class BusinessAccountStatus(StrEnum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
+class BusinessAccountMemberRole(StrEnum):
+    OWNER = "owner"
+    MEMBER = "member"
+
+
+class BusinessBalanceTransactionType(StrEnum):
+    MANUAL_TOPUP = "manual_topup"
+    HOLD = "hold"
+    CAPTURE = "capture"
+    REFUND = "refund"
+    RELEASE = "release"
+    ADJUSTMENT = "adjustment"
+
+
 class PodStatus(StrEnum):
     CREATING = "creating"
     STARTING = "starting"

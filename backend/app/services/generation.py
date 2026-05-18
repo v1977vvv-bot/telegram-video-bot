@@ -17,10 +17,11 @@ from backend.app.repositories.generation_jobs import GenerationJobRepository
 from backend.app.repositories.users import UserRepository
 from backend.app.services.audio import AudioService, SegmentPlan
 from backend.app.services.balances import BalanceService
+from backend.app.services.business_balance import BusinessBalanceService
 from backend.app.services.pricing import PricingService
 from backend.app.services.storage import StorageServiceFactory
 from shared.app.config import Settings, get_settings
-from shared.app.enums import FileType, JobStatus, SegmentStatus
+from shared.app.enums import BillingAccountType, FileType, JobStatus, SegmentStatus
 from shared.app.exceptions import AppError
 from shared.app.storage import validated_extension
 
@@ -68,6 +69,9 @@ class ConfirmationSummary:
     status: str
     price_usd: Decimal
     message: str
+    billing_account_type: str = BillingAccountType.PERSONAL.value
+    business_account_id: UUID | None = None
+    business_account_name: str | None = None
 
 
 class GenerationService:
@@ -208,11 +212,34 @@ class GenerationService:
                 raise AppError("Job price is missing", code="job_price_missing")
             self._validate_audio_limit(job)
 
-            await BalanceService(self._session).freeze_balance_in_transaction(
-                user_id=user.id,
-                amount_usd=job.price_usd,
-                related_job_id=job.id,
-            )
+            business_selection = await BusinessBalanceService(
+                self._session
+            ).get_active_business_account_for_user(user.id)
+            business_account_name: str | None = None
+            if business_selection is not None:
+                business_account = business_selection.account
+                mutation = await BusinessBalanceService(
+                    self._session
+                ).reserve_business_balance_in_transaction(
+                    business_account_id=business_account.id,
+                    user_id=user.id,
+                    job_id=job.id,
+                    amount_usd=job.price_usd,
+                )
+                job.billing_account_type = BillingAccountType.BUSINESS.value
+                job.business_account_id = business_account.id
+                if mutation.transaction is not None:
+                    job.business_hold_transaction_id = mutation.transaction.id
+                business_account_name = business_account.name
+            else:
+                await BalanceService(self._session).freeze_balance_in_transaction(
+                    user_id=user.id,
+                    amount_usd=job.price_usd,
+                    related_job_id=job.id,
+                )
+                job.billing_account_type = BillingAccountType.PERSONAL.value
+                job.business_account_id = None
+                job.business_hold_transaction_id = None
             now = datetime.now(UTC)
             job.status = JobStatus.QUEUED.value
             job.confirmed_at = now
@@ -225,6 +252,9 @@ class GenerationService:
                 status=job.status,
                 price_usd=job.price_usd,
                 message="Задача поставлена в очередь",
+                billing_account_type=job.billing_account_type,
+                business_account_id=job.business_account_id,
+                business_account_name=business_account_name,
             )
 
     async def cancel_job(self, *, job_id: UUID, telegram_id: int) -> ConfirmationSummary:
@@ -239,12 +269,26 @@ class GenerationService:
                 raise AppError("Job cannot be cancelled", code="job_not_cancellable")
 
             if job.status == JobStatus.QUEUED.value and job.price_usd is not None:
-                await BalanceService(self._session).refund_frozen_balance_in_transaction(
-                    user_id=user.id,
-                    amount_usd=job.price_usd,
-                    related_job_id=job.id,
-                    reason="Queued generation job cancelled",
-                )
+                if (
+                    job.billing_account_type == BillingAccountType.BUSINESS.value
+                    and job.business_account_id is not None
+                ):
+                    await BusinessBalanceService(
+                        self._session
+                    ).refund_business_frozen_balance_in_transaction(
+                        business_account_id=job.business_account_id,
+                        job_id=job.id,
+                        amount_usd=job.price_usd,
+                        user_id=user.id,
+                        reason="Queued generation job cancelled",
+                    )
+                else:
+                    await BalanceService(self._session).refund_frozen_balance_in_transaction(
+                        user_id=user.id,
+                        amount_usd=job.price_usd,
+                        related_job_id=job.id,
+                        reason="Queued generation job cancelled",
+                    )
 
             now = datetime.now(UTC)
             job.status = JobStatus.CANCELLED.value
@@ -260,6 +304,9 @@ class GenerationService:
                 status=job.status,
                 price_usd=job.price_usd or Decimal("0.0000"),
                 message="Генерация отменена",
+                billing_account_type=job.billing_account_type,
+                business_account_id=job.business_account_id,
+                business_account_name=None,
             )
 
     async def get_job_detail(self, *, job_id: UUID, telegram_id: int) -> GenerationJob:

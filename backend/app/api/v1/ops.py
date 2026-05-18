@@ -8,13 +8,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.redis import ping_redis
+from backend.app.models.business_account import BusinessAccount
+from backend.app.models.business_account_member import BusinessAccountMember
 from backend.app.models.generation_job import GenerationJob
 from backend.app.models.runpod_pod import RunpodPod
 from backend.app.schemas.ops import OpsDependencyStatus, OpsStatusResponse
 from backend.app.services.payment_packages import PaymentPackageService
 from shared.app.config import get_settings
 from shared.app.database import get_session
-from shared.app.enums import JobStatus
+from shared.app.enums import BusinessAccountStatus, JobStatus
 from worker.app.services.runpod_costs import RunPodCostService
 
 router = APIRouter(prefix="/ops", tags=["ops"])
@@ -28,10 +30,12 @@ async def get_ops_status(session: SessionDep, response: Response) -> OpsStatusRe
     redis = OpsDependencyStatus(status="ok")
     jobs: dict[str, int] = {}
     runpod_pods: dict[str, int] = {}
+    business: dict[str, int] = {}
 
     try:
         jobs = await _count_jobs(session)
         runpod_pods = await _count_runpod_pods(session)
+        business = await _count_business(session)
     except Exception as exc:
         database = OpsDependencyStatus(status="error", error=exc.__class__.__name__)
 
@@ -57,6 +61,7 @@ async def get_ops_status(session: SessionDep, response: Response) -> OpsStatusRe
         runpod_pods=runpod_pods,
         runpod_costs=_runpod_cost_ops_status(settings),
         payments=_payment_ops_status(settings),
+        business=business,
     )
 
 
@@ -91,6 +96,23 @@ async def _count_runpod_pods(session: AsyncSession) -> dict[str, int]:
         if status in {"creating", "starting", "ready", "idle", "busy"}
     )
     return counts
+
+
+async def _count_business(session: AsyncSession) -> dict[str, int]:
+    active_accounts = await session.scalar(
+        select(func.count(BusinessAccount.id)).where(
+            BusinessAccount.status == BusinessAccountStatus.ACTIVE.value
+        )
+    )
+    active_members = await session.scalar(
+        select(func.count(BusinessAccountMember.id)).where(
+            BusinessAccountMember.is_active.is_(True)
+        )
+    )
+    return {
+        "business_accounts_active": int(active_accounts or 0),
+        "business_members_active": int(active_members or 0),
+    }
 
 
 def _payment_ops_status(settings) -> dict[str, object]:

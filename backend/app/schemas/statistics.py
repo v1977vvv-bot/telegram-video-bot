@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from uuid import UUID
 
 from pydantic import BaseModel
 
 from backend.app.schemas.users import BalanceResponse
+
+
+class BusinessBalanceResponse(BaseModel):
+    id: UUID
+    name: str
+    available_usd: Decimal
+    frozen_usd: Decimal
 
 
 class GenerationStatisticsResponse(BaseModel):
@@ -24,5 +32,6 @@ class SpendingStatisticsResponse(BaseModel):
 class UserStatisticsResponse(BaseModel):
     telegram_id: int
     balance: BalanceResponse
+    business_account: BusinessBalanceResponse | None = None
     generations: GenerationStatisticsResponse
     spending: SpendingStatisticsResponse

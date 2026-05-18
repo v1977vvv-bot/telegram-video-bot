@@ -22,6 +22,7 @@ from bot.app.services.backend_client import (
     BackendPaymentRequiredError,
     BackendUnavailableError,
     BotBackendClient,
+    GenerationConfirmDto,
     GenerationDraftDto,
     GenerationFormatSummaryDto,
 )
@@ -165,6 +166,14 @@ async def handle_generation_confirm(callback: CallbackQuery, state: FSMContext) 
             telegram_id=callback.from_user.id,
         )
     except BackendPaymentRequiredError as exc:
+        payment_error = str(exc)
+        if "балансе компании" in payment_error.lower():
+            await callback.message.answer(  # type: ignore[union-attr]
+                "Недостаточно средств на балансе компании. "
+                "Обратитесь к администратору или поддержке."
+            )
+            await callback.answer()
+            return
         await callback.message.answer(  # type: ignore[union-attr]
             safe_html(exc, max_len=300),
             reply_markup=top_up_amounts_keyboard(),
@@ -179,12 +188,12 @@ async def handle_generation_confirm(callback: CallbackQuery, state: FSMContext) 
 
     await state.clear()
     mode_note = _generation_mode_note(segments_count)
+    billing_note = _billing_note(result)
     await callback.message.answer(  # type: ignore[union-attr]
         "✅ Задача поставлена в очередь.\n"
         f"ID: {result.job_id}\n"
         f"Стоимость заморожена: ${_money(result.price_usd)}\n"
-        "Средства зарезервированы и будут списаны только после успешной генерации. "
-        "Если генерация не получится, сумма вернётся на баланс.\n"
+        f"{billing_note}"
         f"{mode_note}"
         "Вы можете поставить ещё одну задачу.",
         reply_markup=main_menu_keyboard(),
@@ -316,6 +325,19 @@ def _generation_mode_note(segments_count: int) -> str:
             "Если GPU временно недоступен, задача будет ожидать повторной попытки.\n"
         )
     return ""
+
+
+def _billing_note(result: GenerationConfirmDto) -> str:
+    if result.billing_account_type == "business":
+        return (
+            "Средства зарезервированы на балансе компании и будут списаны только "
+            "после успешной генерации. Если генерация не получится, сумма вернётся "
+            "на баланс компании.\n"
+        )
+    return (
+        "Средства зарезервированы и будут списаны только после успешной генерации. "
+        "Если генерация не получится, сумма вернётся на баланс.\n"
+    )
 
 
 def _format_backend_error(exc: Exception) -> str:

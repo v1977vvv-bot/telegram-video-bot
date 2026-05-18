@@ -139,6 +139,53 @@ output upload. Failed generations refund the reserved balance. Business packages
 direct support top-ups can be handled manually later through admin/manual balance
 adjustment.
 
+## Business/shared balance accounts
+
+Business accounts are shared USD balances for teams. Personal balance remains the
+default for all users. If a Telegram user is an active member of exactly one active
+business account, generation confirmation reserves funds from the business balance.
+If the user has no active business account, the existing personal balance flow is used.
+
+MVP rules:
+
+- Business members spend from the shared business balance automatically.
+- There is no automatic fallback to personal balance when business balance is
+  insufficient, to avoid unexpected personal charges.
+- Business top-up is manual through protected local debug/admin endpoints and can
+  represent direct payment to support.
+- Generation funds are held before generation and captured only after successful
+  output upload. Failed or cancelled business jobs refund the held amount back to the
+  business balance.
+- The future admin panel will expose this UI; Stage 10.3 only adds local protected
+  endpoints.
+
+Debug/admin commands:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/debug/business-accounts \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Company ABC"}'
+
+curl http://localhost:8000/api/v1/debug/business-accounts
+
+curl -X POST http://localhost:8000/api/v1/debug/business-accounts/{id}/members \
+  -H 'Content-Type: application/json' \
+  -d '{"telegram_id":123456789,"role":"owner"}'
+
+curl -X POST http://localhost:8000/api/v1/debug/business-accounts/{id}/top-up \
+  -H 'Content-Type: application/json' \
+  -d '{"amount_usd":"100.00","reason":"Direct business payment"}'
+
+curl http://localhost:8000/api/v1/debug/business-accounts/{id}/usage
+curl http://localhost:8000/api/v1/debug/business-accounts/{id}/transactions
+
+curl -X DELETE http://localhost:8000/api/v1/debug/business-accounts/{id}/members/{user_id}
+```
+
+Telegram statistics show company balance when a user has an active business account.
+The top-up menu remains the personal Cryptomus package flow; users with business
+balance see a note that company top-ups are handled through support.
+
 ## ComfyUI configuration
 
 `GENERATION_MODE=mock` keeps generation local to the worker stub and does not call ComfyUI.

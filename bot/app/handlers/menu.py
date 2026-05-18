@@ -70,10 +70,23 @@ async def handle_statistics(message: Message) -> None:
         await message.answer("Сервис временно недоступен. Попробуйте позже.")
         return
 
-    await message.answer(
+    balance_lines = (
         "📊 Статистика\n\n"
         f"Баланс: ${_money(statistics.balance.available_usd)}\n"
-        f"Заморожено: ${_money(statistics.balance.frozen_usd)}\n\n"
+        f"Заморожено: ${_money(statistics.balance.frozen_usd)}"
+    )
+    if statistics.business_account is not None:
+        business_name = safe_html(statistics.business_account.name, max_len=80)
+        balance_lines += (
+            "\n\n"
+            f"🏢 Баланс компании: ${_money(statistics.business_account.available_usd)}\n"
+            f"Заморожено компании: ${_money(statistics.business_account.frozen_usd)}\n"
+            f"Компания: {business_name}\n"
+            "Ваши генерации оплачиваются с баланса компании."
+        )
+
+    await message.answer(
+        f"{balance_lines}\n\n"
         "Генерации:\n"
         f"Сегодня: {statistics.generations.today}\n"
         f"За месяц: {statistics.generations.month}\n"

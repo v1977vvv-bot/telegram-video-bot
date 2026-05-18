@@ -10,14 +10,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.balance_account import BalanceAccount
 from backend.app.models.balance_transaction import BalanceTransaction
+from backend.app.models.business_balance_transaction import BusinessBalanceTransaction
 from backend.app.models.generation_job import GenerationJob
 from backend.app.repositories.users import UserRepository
-from shared.app.enums import BalanceTransactionType, JobStatus
+from backend.app.services.business_balance import BusinessBalanceService
+from shared.app.enums import BalanceTransactionType, BusinessBalanceTransactionType, JobStatus
 from shared.app.exceptions import AppError
 
 
 @dataclass(frozen=True, slots=True)
 class BalanceSnapshot:
+    available_usd: Decimal
+    frozen_usd: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class BusinessBalanceSnapshot:
+    id: UUID
+    name: str
     available_usd: Decimal
     frozen_usd: Decimal
 
@@ -42,6 +52,7 @@ class SpendingStatistics:
 class UserStatistics:
     telegram_id: int
     balance: BalanceSnapshot
+    business_account: BusinessBalanceSnapshot | None
     generations: GenerationStatistics
     spending: SpendingStatistics
 
@@ -65,9 +76,11 @@ class UserStatisticsService:
         month_start = today_start.replace(day=1)
 
         balance = await self._get_balance(user.id)
+        business_account = await self._get_business_balance(user.id)
         return UserStatistics(
             telegram_id=user.telegram_id,
             balance=balance,
+            business_account=business_account,
             generations=GenerationStatistics(
                 today=await self._count_generations(user.id, created_since=today_start),
                 month=await self._count_generations(user.id, created_since=month_start),
@@ -100,6 +113,20 @@ class UserStatisticsService:
             frozen_usd=account.frozen_usd,
         )
 
+    async def _get_business_balance(self, user_id: UUID) -> BusinessBalanceSnapshot | None:
+        selection = await BusinessBalanceService(
+            self._session
+        ).get_active_business_account_for_user(user_id)
+        if selection is None:
+            return None
+        account = selection.account
+        return BusinessBalanceSnapshot(
+            id=account.id,
+            name=account.name,
+            available_usd=account.available_usd,
+            frozen_usd=account.frozen_usd,
+        )
+
     async def _count_generations(
         self,
         user_id: UUID,
@@ -120,13 +147,27 @@ class UserStatisticsService:
         *,
         created_since: datetime | None = None,
     ) -> Decimal:
-        statement = select(
+        personal_statement = select(
             func.coalesce(func.sum(func.abs(BalanceTransaction.amount_usd)), 0)
         ).where(
             BalanceTransaction.user_id == user_id,
             BalanceTransaction.type == BalanceTransactionType.CAPTURE.value,
         )
         if created_since is not None:
-            statement = statement.where(BalanceTransaction.created_at >= created_since)
-        value = (await self._session.execute(statement)).scalar_one()
-        return Decimal(value).quantize(Decimal("0.0001"))
+            personal_statement = personal_statement.where(
+                BalanceTransaction.created_at >= created_since
+            )
+        personal_value = (await self._session.execute(personal_statement)).scalar_one()
+
+        business_statement = select(
+            func.coalesce(func.sum(func.abs(BusinessBalanceTransaction.amount_usd)), 0)
+        ).where(
+            BusinessBalanceTransaction.user_id == user_id,
+            BusinessBalanceTransaction.type == BusinessBalanceTransactionType.CAPTURE.value,
+        )
+        if created_since is not None:
+            business_statement = business_statement.where(
+                BusinessBalanceTransaction.created_at >= created_since
+            )
+        business_value = (await self._session.execute(business_statement)).scalar_one()
+        return (Decimal(personal_value) + Decimal(business_value)).quantize(Decimal("0.0001"))

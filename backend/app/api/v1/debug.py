@@ -21,6 +21,8 @@ from sqlalchemy.orm import selectinload
 from backend.app.core.debug_access import require_debug_access
 from backend.app.models.balance_account import BalanceAccount
 from backend.app.models.balance_transaction import BalanceTransaction
+from backend.app.models.business_account import BusinessAccount
+from backend.app.models.business_balance_transaction import BusinessBalanceTransaction
 from backend.app.models.generation_job import GenerationJob
 from backend.app.models.generation_segment import GenerationSegment
 from backend.app.models.runpod_pod import RunpodPod
@@ -66,6 +68,7 @@ from backend.app.schemas.debug import (
 )
 from backend.app.schemas.users import BalanceResponse
 from backend.app.services.balances import BalanceService
+from backend.app.services.business_balance import BusinessBalanceService
 from backend.app.services.file_cleanup import FileCleanupService
 from backend.app.services.pricing import PricingService
 from backend.app.services.storage import StorageServiceFactory
@@ -77,7 +80,14 @@ from backend.app.workers.celery_client import (
 )
 from shared.app.config import get_settings
 from shared.app.database import get_session
-from shared.app.enums import BalanceTransactionType, FileType, JobStatus, SegmentStatus
+from shared.app.enums import (
+    BalanceTransactionType,
+    BillingAccountType,
+    BusinessBalanceTransactionType,
+    FileType,
+    JobStatus,
+    SegmentStatus,
+)
 from shared.app.exceptions import AppError
 from worker.app.services.audio import AudioService as WorkerAudioService
 from worker.app.services.runpod import RunPodCapacityError, RunPodClient, RunPodError
@@ -180,6 +190,9 @@ async def create_debug_mock_generation_jobs(
         duration = payload.duration_seconds.quantize(Decimal("0.001"))
         price = PricingService(settings).calculate_job_price(duration)
         now = datetime.now(UTC)
+        business_selection = await BusinessBalanceService(
+            session
+        ).get_active_business_account_for_user(user.id)
         for _ in range(payload.count):
             job = GenerationJob(
                 user_id=user.id,
@@ -192,6 +205,14 @@ async def create_debug_mock_generation_jobs(
                 price_usd=price,
                 confirmed_at=now,
                 queued_at=now,
+                billing_account_type=(
+                    BillingAccountType.BUSINESS.value
+                    if business_selection is not None
+                    else BillingAccountType.PERSONAL.value
+                ),
+                business_account_id=(
+                    business_selection.account.id if business_selection is not None else None
+                ),
             )
             session.add(job)
             await session.flush()
@@ -208,12 +229,25 @@ async def create_debug_mock_generation_jobs(
             )
             session.add(segment)
 
-            await BalanceService(session).freeze_balance_in_transaction(
-                user_id=user.id,
-                amount_usd=price,
-                related_job_id=job.id,
-                reason="Local debug mock generation job",
-            )
+            if business_selection is not None:
+                mutation = await BusinessBalanceService(
+                    session
+                ).reserve_business_balance_in_transaction(
+                    business_account_id=business_selection.account.id,
+                    user_id=user.id,
+                    job_id=job.id,
+                    amount_usd=price,
+                    reason="Local debug mock generation job",
+                )
+                if mutation.transaction is not None:
+                    job.business_hold_transaction_id = mutation.transaction.id
+            else:
+                await BalanceService(session).freeze_balance_in_transaction(
+                    user_id=user.id,
+                    amount_usd=price,
+                    related_job_id=job.id,
+                    reason="Local debug mock generation job",
+                )
             job_ids.append(job.id)
 
     for job_id in job_ids:
@@ -730,6 +764,8 @@ async def list_debug_generation_jobs(
                 cost_usd=job.cost_usd,
                 gross_margin_usd=gross_margin_usd,
                 gross_margin_percent=gross_margin_percent,
+                billing_account_type=job.billing_account_type,
+                business_account_id=job.business_account_id,
                 waiting_for_gpu_since=job.waiting_for_gpu_since,
                 waiting_for_pod_since=job.waiting_for_pod_since,
                 next_retry_at=job.next_retry_at,
@@ -826,6 +862,47 @@ async def get_debug_ops_anomalies(session: SessionDep) -> DebugOpsAnomaliesRespo
         .order_by(GenerationJob.updated_at.desc())
         .limit(20)
     )
+    business_missing_account_result = await session.execute(
+        select(GenerationJob)
+        .where(
+            GenerationJob.billing_account_type == BillingAccountType.BUSINESS.value,
+            GenerationJob.business_account_id.is_(None),
+        )
+        .order_by(GenerationJob.updated_at.desc())
+        .limit(20)
+    )
+    negative_business_accounts_result = await session.execute(
+        select(BusinessAccount)
+        .where(
+            or_(
+                BusinessAccount.available_usd < Decimal("0"),
+                BusinessAccount.frozen_usd < Decimal("0"),
+            )
+        )
+        .order_by(BusinessAccount.updated_at.desc())
+        .limit(20)
+    )
+    terminal_business_jobs_result = await session.execute(
+        select(GenerationJob)
+        .where(
+            GenerationJob.billing_account_type == BillingAccountType.BUSINESS.value,
+            GenerationJob.status.in_(TERMINAL_GENERATION_JOB_STATUSES),
+            GenerationJob.price_usd.is_not(None),
+        )
+        .order_by(GenerationJob.updated_at.desc())
+        .limit(100)
+    )
+    business_terminal_jobs_with_unsettled_hold: list[dict[str, Any]] = []
+    for job in terminal_business_jobs_result.scalars():
+        totals = await _get_business_job_transaction_totals(session, job.id)
+        held = totals.get(BusinessBalanceTransactionType.HOLD.value, Decimal("0.0000"))
+        captured = totals.get(BusinessBalanceTransactionType.CAPTURE.value, Decimal("0.0000"))
+        returned = _money(
+            totals.get(BusinessBalanceTransactionType.REFUND.value, Decimal("0.0000"))
+            + totals.get(BusinessBalanceTransactionType.RELEASE.value, Decimal("0.0000"))
+        )
+        if _money(held - captured - returned) > Decimal("0"):
+            business_terminal_jobs_with_unsettled_hold.append(_job_anomaly_item(job))
 
     busy_pods_result = await session.execute(
         select(RunpodPod)
@@ -857,6 +934,14 @@ async def get_debug_ops_anomalies(session: SessionDep) -> DebugOpsAnomaliesRespo
             _job_anomaly_item(job) for job in terminal_retry_fields_result.scalars()
         ],
         pods_busy_without_job=pods_busy_without_job,
+        business_jobs_missing_account=[
+            _job_anomaly_item(job) for job in business_missing_account_result.scalars()
+        ],
+        business_accounts_negative_balance=[
+            _business_account_anomaly_item(account)
+            for account in negative_business_accounts_result.scalars()
+        ],
+        business_terminal_jobs_with_unsettled_hold=business_terminal_jobs_with_unsettled_hold,
     )
 
 
@@ -1228,7 +1313,15 @@ async def _fail_generation_job_with_refund(
                 "error_message": job.error_message,
             }
 
-        totals = await _get_job_transaction_totals(session, job.id)
+        business_billing = (
+            job.billing_account_type == BillingAccountType.BUSINESS.value
+            and job.business_account_id is not None
+        )
+        totals = (
+            await _get_business_job_transaction_totals(session, job.id)
+            if business_billing
+            else await _get_job_transaction_totals(session, job.id)
+        )
         held = totals.get(BalanceTransactionType.HOLD.value, Decimal("0.0000"))
         captured = totals.get(BalanceTransactionType.CAPTURE.value, Decimal("0.0000"))
         returned = _money(
@@ -1271,12 +1364,23 @@ async def _fail_generation_job_with_refund(
         refund_error: str | None = None
         if unsettled_hold > Decimal("0"):
             try:
-                await BalanceService(session).refund_frozen_balance_in_transaction(
-                    user_id=job.user_id,
-                    amount_usd=unsettled_hold,
-                    related_job_id=job.id,
-                    reason=error_message,
-                )
+                if business_billing and job.business_account_id is not None:
+                    await BusinessBalanceService(
+                        session
+                    ).refund_business_frozen_balance_in_transaction(
+                        business_account_id=job.business_account_id,
+                        job_id=job.id,
+                        amount_usd=unsettled_hold,
+                        user_id=job.user_id,
+                        reason=error_message,
+                    )
+                else:
+                    await BalanceService(session).refund_frozen_balance_in_transaction(
+                        user_id=job.user_id,
+                        amount_usd=unsettled_hold,
+                        related_job_id=job.id,
+                        reason=error_message,
+                    )
                 refunded = True
             except AppError as exc:
                 refund_error = exc.message
@@ -1358,6 +1462,23 @@ async def _get_job_transaction_totals(
     return totals
 
 
+async def _get_business_job_transaction_totals(
+    session: AsyncSession,
+    job_id: UUID,
+) -> dict[str, Decimal]:
+    result = await session.execute(
+        select(BusinessBalanceTransaction).where(
+            BusinessBalanceTransaction.generation_job_id == job_id
+        )
+    )
+    totals: dict[str, Decimal] = {}
+    for transaction in result.scalars():
+        totals[transaction.type] = _money(
+            totals.get(transaction.type, Decimal("0.0000")) + abs(transaction.amount_usd)
+        )
+    return totals
+
+
 async def _get_job_ledger_flags(
     session: AsyncSession,
     job_ids: list[UUID],
@@ -1368,10 +1489,16 @@ async def _get_job_ledger_flags(
     result = await session.execute(
         select(BalanceTransaction).where(BalanceTransaction.generation_job_id.in_(job_ids))
     )
+    business_result = await session.execute(
+        select(BusinessBalanceTransaction).where(
+            BusinessBalanceTransaction.generation_job_id.in_(job_ids)
+        )
+    )
     flags: dict[UUID, dict[str, bool]] = {
         job_id: {"captured": False, "refunded": False} for job_id in job_ids
     }
-    for transaction in result.scalars():
+    transactions = [*result.scalars(), *business_result.scalars()]
+    for transaction in transactions:
         job_id = transaction.generation_job_id
         if job_id is None:
             continue
@@ -1467,6 +1594,8 @@ def _job_anomaly_item(job: GenerationJob) -> dict[str, Any]:
     return {
         "id": str(job.id),
         "status": job.status,
+        "billing_account_type": job.billing_account_type,
+        "business_account_id": str(job.business_account_id) if job.business_account_id else None,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
         "started_at": job.started_at.isoformat() if job.started_at else None,
@@ -1477,6 +1606,18 @@ def _job_anomaly_item(job: GenerationJob) -> dict[str, Any]:
             job.waiting_for_pod_since.isoformat() if job.waiting_for_pod_since else None
         ),
         "next_retry_at": job.next_retry_at.isoformat() if job.next_retry_at else None,
+    }
+
+
+def _business_account_anomaly_item(account: BusinessAccount) -> dict[str, Any]:
+    return {
+        "id": str(account.id),
+        "name": account.name,
+        "status": account.status,
+        "available_usd": str(account.available_usd),
+        "frozen_usd": str(account.frozen_usd),
+        "created_at": account.created_at.isoformat(),
+        "updated_at": account.updated_at.isoformat(),
     }
 
 

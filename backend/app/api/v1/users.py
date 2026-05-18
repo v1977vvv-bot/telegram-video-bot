@@ -10,6 +10,7 @@ from backend.app.schemas.generations import (
     GenerationHistoryResponse,
 )
 from backend.app.schemas.statistics import (
+    BusinessBalanceResponse,
     GenerationStatisticsResponse,
     SpendingStatisticsResponse,
     UserStatisticsResponse,
@@ -38,6 +39,16 @@ async def get_user_statistics(
         balance=BalanceResponse(
             available_usd=statistics.balance.available_usd,
             frozen_usd=statistics.balance.frozen_usd,
+        ),
+        business_account=(
+            BusinessBalanceResponse(
+                id=statistics.business_account.id,
+                name=statistics.business_account.name,
+                available_usd=statistics.business_account.available_usd,
+                frozen_usd=statistics.business_account.frozen_usd,
+            )
+            if statistics.business_account is not None
+            else None
         ),
         generations=GenerationStatisticsResponse(
             today=statistics.generations.today,

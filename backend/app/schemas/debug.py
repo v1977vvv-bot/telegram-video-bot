@@ -272,6 +272,8 @@ class DebugGenerationJobListItemResponse(BaseModel):
     cost_usd: Decimal | None
     gross_margin_usd: Decimal | None
     gross_margin_percent: Decimal | None
+    billing_account_type: str
+    business_account_id: UUID | None
     waiting_for_gpu_since: datetime | None
     waiting_for_pod_since: datetime | None
     next_retry_at: datetime | None
@@ -297,3 +299,6 @@ class DebugOpsAnomaliesResponse(BaseModel):
     active_pods_without_base_url: list[dict[str, Any]]
     terminal_jobs_with_retry_fields: list[dict[str, Any]]
     pods_busy_without_job: list[dict[str, Any]]
+    business_jobs_missing_account: list[dict[str, Any]]
+    business_accounts_negative_balance: list[dict[str, Any]]
+    business_terminal_jobs_with_unsettled_hold: list[dict[str, Any]]

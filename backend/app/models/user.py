@@ -13,6 +13,7 @@ from backend.app.db.base import Base, TimestampMixin
 if TYPE_CHECKING:
     from backend.app.models.balance_account import BalanceAccount
     from backend.app.models.balance_transaction import BalanceTransaction
+    from backend.app.models.business_account_member import BusinessAccountMember
     from backend.app.models.generation_job import GenerationJob
     from backend.app.models.payment import Payment
     from backend.app.models.uploaded_file import UploadedFile
@@ -46,4 +47,9 @@ class User(TimestampMixin, Base):
     balance_transactions: Mapped[list[BalanceTransaction]] = relationship(
         "BalanceTransaction",
         back_populates="user",
+    )
+    business_memberships: Mapped[list[BusinessAccountMember]] = relationship(
+        "BusinessAccountMember",
+        back_populates="user",
+        cascade="all, delete-orphan",
     )

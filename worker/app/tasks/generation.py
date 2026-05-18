@@ -18,6 +18,7 @@ from backend.app.models.runpod_pod import RunpodPod
 from shared.app.config import Settings, get_settings
 from shared.app.enums import (
     AudioSegmentationStrategy,
+    BillingAccountType,
     FileType,
     GenerationMode,
     JobStatus,
@@ -28,6 +29,7 @@ from worker.app.celery_app import celery_app
 from worker.app.database import get_worker_session
 from worker.app.services.audio import AudioSegmentFile, AudioSegmentPlan, AudioService
 from worker.app.services.balance import SyncBalanceService
+from worker.app.services.business_balance import SyncBusinessBalanceService
 from worker.app.services.comfyui_client import ComfyUIClient
 from worker.app.services.distributed_generation import DistributedSegmentGenerationService
 from worker.app.services.runpod import NoGpuAvailableError, RunPodPoolFullError
@@ -171,12 +173,7 @@ def _run_mock_generation(job_id: UUID) -> dict[str, str]:
                 content=f"Mock generation completed successfully for job {job.id}".encode(),
                 mime_type="text/plain",
             )
-            SyncBalanceService(session).capture_frozen_balance(
-                user_id=job.user_id,
-                amount_usd=job.price_usd,
-                related_job_id=job.id,
-                reason="Mock generation completed",
-            )
+            _capture_job_balance(session, job, reason="Mock generation completed")
             telegram_id = job.user.telegram_id
             result_url = WorkerStorageService(session).get_download_url(
                 result_file,
@@ -1224,12 +1221,7 @@ def _complete_comfyui_job(
                 local_path=output_path,
                 mime_type="video/mp4",
             )
-            SyncBalanceService(session).capture_frozen_balance(
-                user_id=job.user_id,
-                amount_usd=job.price_usd,
-                related_job_id=job.id,
-                reason="ComfyUI generation completed",
-            )
+            _capture_job_balance(session, job, reason="ComfyUI generation completed")
             telegram_id = job.user.telegram_id
             result_url = WorkerStorageService(session).get_download_url(
                 result_file,
@@ -1261,6 +1253,52 @@ def _complete_comfyui_job(
             )
 
 
+def _capture_job_balance(session: Session, job: GenerationJob, *, reason: str) -> None:
+    if job.price_usd is None:
+        raise RuntimeError("Job price is missing")
+    if job.billing_account_type == BillingAccountType.BUSINESS.value:
+        if job.business_account_id is None:
+            raise RuntimeError("Business billing job is missing business_account_id")
+        SyncBusinessBalanceService(session).capture_frozen_balance(
+            business_account_id=job.business_account_id,
+            user_id=job.user_id,
+            amount_usd=job.price_usd,
+            related_job_id=job.id,
+            reason=reason,
+        )
+        return
+
+    SyncBalanceService(session).capture_frozen_balance(
+        user_id=job.user_id,
+        amount_usd=job.price_usd,
+        related_job_id=job.id,
+        reason=reason,
+    )
+
+
+def _refund_job_balance(session: Session, job: GenerationJob, *, reason: str) -> None:
+    if job.price_usd is None:
+        raise RuntimeError("Job price is missing")
+    if job.billing_account_type == BillingAccountType.BUSINESS.value:
+        if job.business_account_id is None:
+            raise RuntimeError("Business billing job is missing business_account_id")
+        SyncBusinessBalanceService(session).refund_frozen_balance(
+            business_account_id=job.business_account_id,
+            user_id=job.user_id,
+            amount_usd=job.price_usd,
+            related_job_id=job.id,
+            reason=reason,
+        )
+        return
+
+    SyncBalanceService(session).refund_frozen_balance(
+        user_id=job.user_id,
+        amount_usd=job.price_usd,
+        related_job_id=job.id,
+        reason=reason,
+    )
+
+
 def _mark_job_failed(job_id: UUID, error_message: str) -> GenerationNotification | None:
     with get_worker_session() as session:
         with session.begin():
@@ -1283,12 +1321,7 @@ def _mark_job_failed(job_id: UUID, error_message: str) -> GenerationNotification
                 JobStatus.GENERATING.value,
             }:
                 try:
-                    SyncBalanceService(session).refund_frozen_balance(
-                        user_id=job.user_id,
-                        amount_usd=job.price_usd,
-                        related_job_id=job.id,
-                        reason="Generation failed",
-                    )
+                    _refund_job_balance(session, job, reason="Generation failed")
                     funds_returned = True
                 except Exception as exc:
                     refund_error = str(exc)

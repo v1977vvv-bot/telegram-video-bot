@@ -13,6 +13,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from backend.app.models.business_account import BusinessAccount
+    from backend.app.models.business_balance_transaction import BusinessBalanceTransaction
     from backend.app.models.generation_segment import GenerationSegment
     from backend.app.models.user import User
 
@@ -46,6 +48,20 @@ class GenerationJob(TimestampMixin, Base):
     segments_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     price_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    billing_account_type: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="personal",
+        server_default="personal",
+    )
+    business_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("business_accounts.id", ondelete="SET NULL"),
+    )
+    business_hold_transaction_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("business_balance_transactions.id", ondelete="SET NULL"),
+    )
     error_message: Mapped[str | None] = mapped_column(Text)
     mock_result_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -58,6 +74,15 @@ class GenerationJob(TimestampMixin, Base):
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship("User", back_populates="generation_jobs")
+    business_account: Mapped[BusinessAccount | None] = relationship(
+        "BusinessAccount",
+        back_populates="generation_jobs",
+        foreign_keys=[business_account_id],
+    )
+    business_hold_transaction: Mapped[BusinessBalanceTransaction | None] = relationship(
+        "BusinessBalanceTransaction",
+        foreign_keys=[business_hold_transaction_id],
+    )
     segments: Mapped[list[GenerationSegment]] = relationship(
         "GenerationSegment",
         back_populates="job",

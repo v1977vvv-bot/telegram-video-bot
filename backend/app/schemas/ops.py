@@ -21,3 +21,4 @@ class OpsStatusResponse(BaseModel):
     runpod_pods: dict[str, int]
     runpod_costs: dict[str, object]
     payments: dict[str, object]
+    business: dict[str, int]

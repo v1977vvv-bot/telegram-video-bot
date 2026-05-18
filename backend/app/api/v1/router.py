@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from backend.app.api.v1.business_debug import router as business_debug_router
 from backend.app.api.v1.debug import router as debug_router
 from backend.app.api.v1.files import router as files_router
 from backend.app.api.v1.generation import router as generation_router
@@ -18,6 +19,7 @@ api_router.include_router(ops_router)
 api_router.include_router(settings_router)
 api_router.include_router(payments_router)
 api_router.include_router(debug_router)
+api_router.include_router(business_debug_router)
 api_router.include_router(telegram_router)
 api_router.include_router(users_router)
 api_router.include_router(generation_router)

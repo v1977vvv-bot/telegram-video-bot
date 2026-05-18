@@ -33,6 +33,14 @@ class BalanceDto:
 
 
 @dataclass(frozen=True, slots=True)
+class BusinessBalanceDto:
+    id: UUID
+    name: str
+    available_usd: Decimal
+    frozen_usd: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class TelegramUserDto:
     id: UUID
     telegram_id: int
@@ -64,6 +72,7 @@ class SpendingStatsDto:
 class UserStatisticsDto:
     telegram_id: int
     balance: BalanceDto
+    business_account: BusinessBalanceDto | None
     generations: GenerationStatsDto
     spending: SpendingStatsDto
 
@@ -122,6 +131,9 @@ class GenerationConfirmDto:
     status: str
     price_usd: Decimal
     message: str
+    billing_account_type: str
+    business_account_id: UUID | None
+    business_account_name: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +185,7 @@ class BotBackendClient:
         return UserStatisticsDto(
             telegram_id=int(data["telegram_id"]),
             balance=self._parse_balance(data["balance"]),
+            business_account=self._parse_business_balance(data.get("business_account")),
             generations=GenerationStatsDto(
                 today=int(data["generations"]["today"]),
                 month=int(data["generations"]["month"]),
@@ -302,6 +315,11 @@ class BotBackendClient:
             status=str(data["status"]),
             price_usd=Decimal(str(data["price_usd"])),
             message=str(data["message"]),
+            billing_account_type=str(data.get("billing_account_type") or "personal"),
+            business_account_id=UUID(data["business_account_id"])
+            if data.get("business_account_id") is not None
+            else None,
+            business_account_name=data.get("business_account_name"),
         )
 
     async def cancel_generation(self, *, job_id: UUID, telegram_id: int) -> GenerationConfirmDto:
@@ -315,6 +333,11 @@ class BotBackendClient:
             status=str(data["status"]),
             price_usd=Decimal(str(data["price_usd"])),
             message=str(data["message"]),
+            billing_account_type=str(data.get("billing_account_type") or "personal"),
+            business_account_id=UUID(data["business_account_id"])
+            if data.get("business_account_id") is not None
+            else None,
+            business_account_name=data.get("business_account_name"),
         )
 
     async def get_payment_packages(self) -> list[PaymentPackageDto]:
@@ -408,6 +431,16 @@ class BotBackendClient:
 
     def _parse_balance(self, data: dict[str, Any]) -> BalanceDto:
         return BalanceDto(
+            available_usd=Decimal(str(data["available_usd"])),
+            frozen_usd=Decimal(str(data["frozen_usd"])),
+        )
+
+    def _parse_business_balance(self, data: dict[str, Any] | None) -> BusinessBalanceDto | None:
+        if data is None:
+            return None
+        return BusinessBalanceDto(
+            id=UUID(data["id"]),
+            name=str(data["name"]),
             available_usd=Decimal(str(data["available_usd"])),
             frozen_usd=Decimal(str(data["frozen_usd"])),
         )

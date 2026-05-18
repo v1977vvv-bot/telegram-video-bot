@@ -102,6 +102,9 @@ async def confirm_generation_draft(
         status=summary.status,
         price_usd=summary.price_usd,
         message=summary.message,
+        billing_account_type=summary.billing_account_type,
+        business_account_id=summary.business_account_id,
+        business_account_name=summary.business_account_name,
     )
 
 
@@ -120,6 +123,9 @@ async def cancel_generation_draft(
         status=summary.status,
         price_usd=summary.price_usd,
         message=summary.message,
+        billing_account_type=summary.billing_account_type,
+        business_account_id=summary.business_account_id,
+        business_account_name=summary.business_account_name,
     )
 
 

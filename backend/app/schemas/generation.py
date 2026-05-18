@@ -45,6 +45,9 @@ class GenerationConfirmResponse(BaseModel):
     status: str
     price_usd: Decimal
     message: str
+    billing_account_type: str
+    business_account_id: UUID | None = None
+    business_account_name: str | None = None
 
 
 class GenerationSegmentDetailResponse(BaseModel):
