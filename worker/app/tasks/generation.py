@@ -631,17 +631,10 @@ def _handle_no_gpu_available(
                 job_id,
                 next_retry_at,
             )
+            notification = _build_waiting_notification_once(session, job, now)
             return WaitingRunPodResult(
                 status=JobStatus.WAITING_FOR_GPU.value,
-                notification=GenerationNotification(
-                    telegram_id=job.user.telegram_id,
-                    job_id=job.id,
-                    display_name=_job_display_name(session, job),
-                    audio_duration_seconds=job.audio_duration_seconds,
-                    price_usd=job.price_usd,
-                    segments_count=job.segments_count,
-                    funds_returned=False,
-                ),
+                notification=notification,
             )
 
 
@@ -690,17 +683,10 @@ def _handle_runpod_pool_full(
                 job_id,
                 next_retry_at,
             )
+            notification = _build_waiting_notification_once(session, job, now)
             return WaitingRunPodResult(
                 status=JobStatus.WAITING_FOR_POD.value,
-                notification=GenerationNotification(
-                    telegram_id=job.user.telegram_id,
-                    job_id=job.id,
-                    display_name=_job_display_name(session, job),
-                    audio_duration_seconds=job.audio_duration_seconds,
-                    price_usd=job.price_usd,
-                    segments_count=job.segments_count,
-                    funds_returned=False,
-                ),
+                notification=notification,
             )
 
 
@@ -710,6 +696,31 @@ def _schedule_waiting_retry(retry_seconds: int) -> None:
         retry_waiting_generation_jobs.apply_async(countdown=countdown)
     except Exception:
         logger.warning("Waiting generation retry scheduling failed")
+
+
+def _build_waiting_notification_once(
+    session: Session,
+    job: GenerationJob,
+    now: datetime,
+) -> GenerationNotification | None:
+    if job.waiting_notification_sent_at is not None:
+        logger.info(
+            "Suppressing duplicate waiting notification job_id=%s sent_at=%s",
+            job.id,
+            job.waiting_notification_sent_at,
+        )
+        return None
+
+    job.waiting_notification_sent_at = now
+    return GenerationNotification(
+        telegram_id=job.user.telegram_id,
+        job_id=job.id,
+        display_name=_job_display_name(session, job),
+        audio_duration_seconds=job.audio_duration_seconds,
+        price_usd=job.price_usd,
+        segments_count=job.segments_count,
+        funds_returned=False,
+    )
 
 
 def _retry_waiting_for_gpu_jobs(limit: int = 50) -> dict[str, object]:

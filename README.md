@@ -1047,6 +1047,8 @@ Bot API. User-facing notifications use a short video display name derived from t
 uploaded photo and audio filenames. Completed jobs get `✅ Видео готово` with the
 display name, charged amount, and a download button when a result URL is available.
 Failed jobs use non-technical copy and mention whether funds were returned.
+Waiting/server-busy notifications are sent once per generation job; automatic retry
+cycles update queue state silently until the job starts, completes, or fails.
 
 Notification failures are logged as warnings and never change generation job status
 or balance ledger results.

@@ -71,6 +71,7 @@ class GenerationJob(TimestampMixin, Base):
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     waiting_for_gpu_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     waiting_for_pod_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    waiting_notification_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship("User", back_populates="generation_jobs")
