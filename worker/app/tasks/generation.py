@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 from backend.app.models.generation_job import GenerationJob
 from backend.app.models.generation_segment import GenerationSegment
 from backend.app.models.runpod_pod import RunpodPod
+from backend.app.models.uploaded_file import UploadedFile
 from shared.app.config import Settings, get_settings
 from shared.app.enums import (
     AudioSegmentationStrategy,
@@ -25,6 +26,7 @@ from shared.app.enums import (
     SegmentImageStrategy,
     SegmentStatus,
 )
+from shared.app.job_names import build_job_display_name
 from worker.app.celery_app import celery_app
 from worker.app.database import get_worker_session
 from worker.app.services.audio import AudioSegmentFile, AudioSegmentPlan, AudioService
@@ -188,6 +190,7 @@ def _run_mock_generation(job_id: UUID) -> dict[str, str]:
             notification = GenerationNotification(
                 telegram_id=telegram_id,
                 job_id=job.id,
+                display_name=_job_display_name(session, job),
                 audio_duration_seconds=job.audio_duration_seconds,
                 price_usd=job.price_usd,
                 segments_count=job.segments_count,
@@ -633,6 +636,7 @@ def _handle_no_gpu_available(
                 notification=GenerationNotification(
                     telegram_id=job.user.telegram_id,
                     job_id=job.id,
+                    display_name=_job_display_name(session, job),
                     audio_duration_seconds=job.audio_duration_seconds,
                     price_usd=job.price_usd,
                     segments_count=job.segments_count,
@@ -691,6 +695,7 @@ def _handle_runpod_pool_full(
                 notification=GenerationNotification(
                     telegram_id=job.user.telegram_id,
                     job_id=job.id,
+                    display_name=_job_display_name(session, job),
                     audio_duration_seconds=job.audio_duration_seconds,
                     price_usd=job.price_usd,
                     segments_count=job.segments_count,
@@ -1246,6 +1251,7 @@ def _complete_comfyui_job(
             return GenerationNotification(
                 telegram_id=telegram_id,
                 job_id=job.id,
+                display_name=_job_display_name(session, job),
                 audio_duration_seconds=job.audio_duration_seconds,
                 price_usd=job.price_usd,
                 segments_count=job.segments_count,
@@ -1352,6 +1358,7 @@ def _mark_job_failed(job_id: UUID, error_message: str) -> GenerationNotification
             return GenerationNotification(
                 telegram_id=job.user.telegram_id,
                 job_id=job.id,
+                display_name=_job_display_name(session, job),
                 audio_duration_seconds=job.audio_duration_seconds,
                 price_usd=job.price_usd,
                 segments_count=job.segments_count,
@@ -1364,6 +1371,16 @@ def _clear_waiting_fields(job: GenerationJob) -> None:
     job.next_retry_at = None
     job.waiting_for_gpu_since = None
     job.waiting_for_pod_since = None
+
+
+def _job_display_name(session: Session, job: GenerationJob) -> str:
+    image_file = session.get(UploadedFile, job.source_image_file_id)
+    audio_file = session.get(UploadedFile, job.source_audio_file_id)
+    return build_job_display_name(
+        image_filename=image_file.original_filename if image_file else None,
+        audio_filename=audio_file.original_filename if audio_file else None,
+        created_at=job.created_at,
+    )
 
 
 def _notify_generation_completed(notification: GenerationNotification | None) -> None:

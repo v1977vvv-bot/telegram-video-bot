@@ -50,6 +50,7 @@ async def create_generation_draft(
     )
     return GenerationDraftResponse(
         job_id=summary.job_id,
+        display_name=summary.display_name,
         status=summary.status,
         audio_duration_seconds=summary.audio_duration_seconds,
         segments_count=summary.segments_count,
@@ -76,6 +77,7 @@ async def update_generation_format(
     )
     return GenerationFormatResponse(
         job_id=summary.job_id,
+        display_name=summary.display_name,
         status=summary.status,
         width=summary.width,
         height=summary.height,
@@ -99,6 +101,7 @@ async def confirm_generation_draft(
     enqueue_generation_job(str(summary.job_id))
     return GenerationConfirmResponse(
         job_id=summary.job_id,
+        display_name=summary.display_name,
         status=summary.status,
         price_usd=summary.price_usd,
         message=summary.message,
@@ -120,6 +123,7 @@ async def cancel_generation_draft(
     )
     return GenerationConfirmResponse(
         job_id=summary.job_id,
+        display_name=summary.display_name,
         status=summary.status,
         price_usd=summary.price_usd,
         message=summary.message,
@@ -136,8 +140,10 @@ async def get_generation_job(
     session: SessionDep,
 ) -> GenerationJobDetailResponse:
     job = await GenerationService(session).get_job_detail(job_id=job_id, telegram_id=telegram_id)
+    display_name = await GenerationService(session).get_job_display_name(job)
     return GenerationJobDetailResponse(
         job_id=job.id,
+        display_name=display_name,
         status=job.status,
         width=job.width,
         height=job.height,

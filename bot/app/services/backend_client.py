@@ -80,6 +80,7 @@ class UserStatisticsDto:
 @dataclass(frozen=True, slots=True)
 class GenerationHistoryItemDto:
     id: UUID
+    display_name: str
     status: str
     width: int
     height: int
@@ -105,6 +106,7 @@ class GenerationFormatDto:
 @dataclass(frozen=True, slots=True)
 class GenerationDraftDto:
     job_id: UUID
+    display_name: str
     status: str
     audio_duration_seconds: Decimal
     segments_count: int
@@ -116,6 +118,7 @@ class GenerationDraftDto:
 @dataclass(frozen=True, slots=True)
 class GenerationFormatSummaryDto:
     job_id: UUID
+    display_name: str
     status: str
     width: int
     height: int
@@ -128,6 +131,7 @@ class GenerationFormatSummaryDto:
 @dataclass(frozen=True, slots=True)
 class GenerationConfirmDto:
     job_id: UUID
+    display_name: str
     status: str
     price_usd: Decimal
     message: str
@@ -215,6 +219,7 @@ class BotBackendClient:
         return [
             GenerationHistoryItemDto(
                 id=UUID(item["id"]),
+                display_name=str(item.get("display_name") or "Видео"),
                 status=str(item["status"]),
                 width=int(item["width"]),
                 height=int(item["height"]),
@@ -266,6 +271,7 @@ class BotBackendClient:
         )
         return GenerationDraftDto(
             job_id=UUID(data["job_id"]),
+            display_name=str(data.get("display_name") or "Видео"),
             status=str(data["status"]),
             audio_duration_seconds=Decimal(str(data["audio_duration_seconds"])),
             segments_count=int(data["segments_count"]),
@@ -296,6 +302,7 @@ class BotBackendClient:
         )
         return GenerationFormatSummaryDto(
             job_id=UUID(data["job_id"]),
+            display_name=str(data.get("display_name") or "Видео"),
             status=str(data["status"]),
             width=int(data["width"]),
             height=int(data["height"]),
@@ -313,6 +320,7 @@ class BotBackendClient:
         )
         return GenerationConfirmDto(
             job_id=UUID(data["job_id"]),
+            display_name=str(data.get("display_name") or "Видео"),
             status=str(data["status"]),
             price_usd=Decimal(str(data["price_usd"])),
             message=str(data["message"]),
@@ -331,6 +339,7 @@ class BotBackendClient:
         )
         return GenerationConfirmDto(
             job_id=UUID(data["job_id"]),
+            display_name=str(data.get("display_name") or "Видео"),
             status=str(data["status"]),
             price_usd=Decimal(str(data["price_usd"])),
             message=str(data["message"]),

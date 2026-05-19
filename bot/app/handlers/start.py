@@ -26,7 +26,10 @@ async def handle_start(message: Message) -> None:
             return
 
         if user.is_banned:
-            await message.answer("Доступ ограничен.")
+            await message.answer(
+                "Ваш аккаунт временно ограничен.\n\n"
+                "Если вы считаете, что это ошибка, напишите в поддержку."
+            )
             return
 
         logger.info(
@@ -34,7 +37,9 @@ async def handle_start(message: Message) -> None:
         )
 
     await message.answer(
-        "Привет! Я помогу сгенерировать видео по фото и аудио. "
-        "Сейчас доступен базовый каркас, а генерация будет подключена на следующих этапах.",
+        "Привет! Я SynzAI — бот для создания AI-видеоаватаров.\n\n"
+        "Загрузите фото, добавьте голос или аудио — и получите готовое видео "
+        "с говорящим аватаром.\n\n"
+        "Фото + голос → AI-видеоаватар.",
         reply_markup=main_menu_keyboard(),
     )

@@ -62,6 +62,8 @@ from backend.app.schemas.admin import (
     FailRefundJobRequest,
     ManualBusinessTopUpRequest,
     ManualPersonalTopUpRequest,
+    PaymentRecheckRequest,
+    PaymentRecheckResponse,
     RetryWaitingJobsRequest,
     TerminateRunPodRequest,
     UserBlockRequest,
@@ -69,6 +71,7 @@ from backend.app.schemas.admin import (
 from backend.app.services.admin_audit import AdminAuditService
 from backend.app.services.balances import BalanceService
 from backend.app.services.business_balance import BusinessBalanceService
+from backend.app.services.payment_reconciliation import CryptoBotPaymentReconciliationService
 from backend.app.services.telegram_notify import TelegramNotificationService
 from shared.app.config import Settings
 from shared.app.database import get_session
@@ -265,9 +268,9 @@ async def list_admin_audit_logs(
     )
 
 
-@router.post("/users/{user_id}/balance/top-up", response_model=AdminActionResponse)
+@router.post("/users/{user_identifier}/balance/top-up", response_model=AdminActionResponse)
 async def admin_top_up_personal_balance(
-    user_id: UUID,
+    user_identifier: str,
     payload: ManualPersonalTopUpRequest,
     request: Request,
     session: SessionDep,
@@ -281,9 +284,7 @@ async def admin_top_up_personal_balance(
     warning: str | None = None
 
     async with session.begin():
-        user = await session.get(User, user_id)
-        if user is None:
-            raise AppError("User not found", code="user_not_found", status_code=404)
+        user = await _get_user_for_topup_identifier(session, user_identifier)
         balance_service = BalanceService(session)
         account, transaction = await balance_service.admin_adjustment_balance_in_transaction(
             user_id=user.id,
@@ -292,11 +293,15 @@ async def admin_top_up_personal_balance(
         )
         audit_log = await AdminAuditService(session).log(
             admin_identifier=str(admin),
-            action="personal_balance_topup",
+            action="user_balance_top_up",
             request=request,
             target_type="user",
             target_id=str(user.id),
-            metadata={"amount_usd": str(amount), "reason": reason},
+            metadata={
+                "amount_usd": str(amount),
+                "reason": reason,
+                "input_identifier": user_identifier,
+            },
         )
         telegram_id = user.telegram_id
         available = account.available_usd
@@ -305,9 +310,9 @@ async def admin_top_up_personal_balance(
         audit_log_id = audit_log.id
 
     message = (
-        "✅ Баланс пополнен\n\n"
-        f"На ваш баланс зачислено: ${amount}\n"
-        f"Текущий баланс: ${available}\n\n"
+        "✅ Баланс пополнен.\n\n"
+        f"Зачислено: ${amount.quantize(Decimal('0.01'))}\n"
+        f"Текущий баланс: ${available.quantize(Decimal('0.01'))}\n\n"
         "Теперь вы можете запустить генерацию."
     )
     notification_sent, warning = await _send_telegram_notification(
@@ -316,8 +321,8 @@ async def admin_top_up_personal_balance(
     )
     return AdminActionResponse(
         success=True,
-        target_id=str(user_id),
-        action="personal_balance_topup",
+        target_id=str(user.id),
+        action="user_balance_top_up",
         audit_log_id=audit_log_id,
         transaction_id=transaction_id,
         amount_usd=amount,
@@ -325,6 +330,58 @@ async def admin_top_up_personal_balance(
         balance_frozen_usd=frozen,
         telegram_notification_sent=notification_sent,
         warning=warning,
+    )
+
+
+@router.post("/payments/{payment_id}/recheck", response_model=PaymentRecheckResponse)
+async def admin_recheck_payment(
+    payment_id: UUID,
+    payload: PaymentRecheckRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> PaymentRecheckResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    reconciliation_service = CryptoBotPaymentReconciliationService(session, settings=settings)
+    result = await reconciliation_service.reconcile_payment(
+        payment_id=payment_id,
+    )
+    async with session.begin():
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="payment_recheck",
+            request=request,
+            target_type="payment",
+            target_id=str(payment_id),
+            metadata={
+                "reason": reason,
+                "provider": result.provider,
+                "provider_invoice_id": result.provider_invoice_id,
+                "old_status": result.old_status,
+                "new_status": result.new_status,
+                "credited": result.credited,
+                "credited_amount_usd": (
+                    str(result.credited_amount_usd)
+                    if result.credited_amount_usd is not None
+                    else None
+                ),
+            },
+        )
+        audit_log_id = audit_log.id
+
+    return PaymentRecheckResponse(
+        payment_id=result.payment_id,
+        provider=result.provider,
+        provider_invoice_id=result.provider_invoice_id,
+        old_status=result.old_status,
+        new_status=result.new_status,
+        credited=result.credited,
+        credited_amount_usd=result.credited_amount_usd,
+        message=result.message,
+        audit_log_id=audit_log_id,
+        telegram_notification_sent=result.telegram_notification_sent,
+        warning=result.warning,
     )
 
 
@@ -375,8 +432,8 @@ async def admin_top_up_business_balance(
         message = (
             "✅ Баланс компании пополнен\n\n"
             f"Компания: {account_name}\n"
-            f"Зачислено: ${amount}\n"
-            f"Текущий баланс компании: ${available}"
+            f"Зачислено: ${amount.quantize(Decimal('0.01'))}\n"
+            f"Текущий баланс компании: ${available.quantize(Decimal('0.01'))}"
         )
         sent, warning = await _send_telegram_notification(telegram_id=telegram_id, message=message)
         if sent:
@@ -1252,6 +1309,25 @@ async def _get_user_for_admin_member_payload(
         user = result.scalar_one_or_none()
     else:
         raise AppError("telegram_id or user_id is required", code="member_user_required")
+    if user is None:
+        raise AppError("User not found", code="user_not_found", status_code=404)
+    return user
+
+
+async def _get_user_for_topup_identifier(session: AsyncSession, identifier: str) -> User:
+    try:
+        user_uuid = UUID(identifier)
+    except ValueError:
+        user_uuid = None
+
+    if user_uuid is not None:
+        user = await session.get(User, user_uuid)
+    elif identifier.isdigit():
+        result = await session.execute(select(User).where(User.telegram_id == int(identifier)))
+        user = result.scalar_one_or_none()
+    else:
+        user = None
+
     if user is None:
         raise AppError("User not found", code="user_not_found", status_code=404)
     return user

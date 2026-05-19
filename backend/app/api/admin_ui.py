@@ -237,7 +237,7 @@ def _admin_page(page: str) -> HTMLResponse:
         users: `
           <h3>User controls</h3>
           <form class="action-form" data-action="personal_topup">
-            <input name="user_id" placeholder="User UUID" required>
+            <input name="user_id" placeholder="Internal user UUID or Telegram ID" required>
             <input name="amount_usd" placeholder="Amount USD" required>
             <input name="reason" placeholder="Reason" required>
             <button type="submit">Top up personal balance</button>
@@ -259,6 +259,14 @@ def _admin_page(page: str) -> HTMLResponse:
             <input name="reason" placeholder="Reason" required>
             <button type="submit">Fail and refund job</button>
           </form>`,
+        payments: `
+          <h3>Payment controls</h3>
+          <form class="action-form" data-action="payment_recheck">
+            <input name="payment_id" placeholder="Payment UUID" required>
+            <input name="reason" placeholder="Reason" value="Recheck CryptoBot invoice" required>
+            <button type="submit">Recheck payment</button>
+          </form>
+          <p class="muted">Use this for pending CryptoBot invoices after webhook downtime.</p>`,
         runpod: `
           <h3>RunPod controls</h3>
           <form class="action-form" data-action="terminate_pod">
@@ -343,6 +351,8 @@ def _admin_page(page: str) -> HTMLResponse:
         path = `/api/v1/admin/users/${{data.user_id}}/unblock`;
       }} else if (form.dataset.action === "fail_refund") {{
         path = `/api/v1/admin/jobs/${{data.job_id}}/fail-refund`;
+      }} else if (form.dataset.action === "payment_recheck") {{
+        path = `/api/v1/admin/payments/${{data.payment_id}}/recheck`;
       }} else if (form.dataset.action === "terminate_pod") {{
         path = `/api/v1/admin/runpod/pods/${{data.runpod_pod_id}}/terminate`;
       }} else if (form.dataset.action === "business_topup") {{

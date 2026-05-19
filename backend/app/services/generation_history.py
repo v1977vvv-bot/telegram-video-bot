@@ -15,11 +15,13 @@ from backend.app.services.storage import StorageServiceFactory
 from shared.app.config import Settings, get_settings
 from shared.app.enums import StorageProvider
 from shared.app.exceptions import AppError
+from shared.app.job_names import build_job_display_name
 
 
 @dataclass(frozen=True, slots=True)
 class GenerationHistoryItem:
     id: UUID
+    display_name: str
     status: str
     width: int
     height: int
@@ -67,9 +69,30 @@ class GenerationHistoryService:
         output_files = await self._get_output_files(
             [job.output_file_id for job in jobs if job.output_file_id is not None]
         )
+        source_files = await self._get_output_files(
+            [
+                file_id
+                for job in jobs
+                for file_id in (job.source_image_file_id, job.source_audio_file_id)
+                if file_id is not None
+            ]
+        )
         return [
             GenerationHistoryItem(
                 id=job.id,
+                display_name=build_job_display_name(
+                    image_filename=(
+                        source_files[job.source_image_file_id].original_filename
+                        if job.source_image_file_id in source_files
+                        else None
+                    ),
+                    audio_filename=(
+                        source_files[job.source_audio_file_id].original_filename
+                        if job.source_audio_file_id in source_files
+                        else None
+                    ),
+                    created_at=job.created_at,
+                ),
                 status=job.status,
                 width=job.width,
                 height=job.height,

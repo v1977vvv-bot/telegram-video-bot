@@ -10,7 +10,6 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.payment import Payment
-from backend.app.models.user import User
 from backend.app.repositories.users import UserRepository
 from backend.app.schemas.payments import (
     CreatePaymentInvoiceRequest,
@@ -25,22 +24,17 @@ from backend.app.services.payment_packages import PaymentPackageService
 from backend.app.services.payment_providers.cryptobot import (
     CryptoBotPayClient,
     extract_invoice_from_update,
-    invoice_amount,
-    invoice_asset,
     invoice_provider_id,
-    invoice_status,
 )
 from backend.app.services.payment_providers.cryptomus import CryptomusPaymentProvider
-from backend.app.services.telegram_notify import TelegramNotificationService
+from backend.app.services.payment_reconciliation import CryptoBotPaymentReconciliationService
 from shared.app.config import get_settings
 from shared.app.database import get_session
 from shared.app.enums import PaymentProvider, PaymentStatus
 from shared.app.exceptions import AppError
-from shared.app.logging import get_logger
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
-logger = get_logger(__name__)
 
 
 @router.get("/packages", response_model=PaymentPackagesResponse)
@@ -144,59 +138,12 @@ async def handle_cryptobot_webhook(
     if provider_invoice_id is None:
         raise AppError("Webhook has no invoice id", code="invalid_webhook", status_code=400)
 
-    verified_invoice = await client.get_invoice(provider_invoice_id)
-    if verified_invoice is None:
-        logger.warning("CryptoBot webhook invoice not found invoice_id=%s", provider_invoice_id)
-        return PaymentWebhookResponse(ok=True)
-
-    verified_status = invoice_status(verified_invoice)
-    notification: tuple[int, Decimal, Decimal] | None = None
-    async with session.begin():
-        payment = await _get_payment_by_provider_invoice(
-            session,
-            provider=PaymentProvider.CRYPTOBOT.value,
-            provider_invoice_id=provider_invoice_id,
-        )
-        if payment is None:
-            logger.warning("CryptoBot webhook payment not found invoice_id=%s", provider_invoice_id)
-            return PaymentWebhookResponse(ok=True)
-        _validate_payment_package_record(payment)
-        _validate_cryptobot_verified_invoice(
-            payment,
-            verified_invoice,
-            settings.payment_provider_currency,
-        )
-        previous_status = payment.status
-        payment.raw_payload = _merge_payment_payload(
-            payment.raw_payload,
-            {"webhook": payload, "verified_invoice": verified_invoice},
-        )
-
-        if verified_status == "paid":
-            if previous_status != PaymentStatus.PAID.value:
-                account = await BalanceService(session).add_balance_in_transaction(
-                    user_id=payment.user_id,
-                    amount_usd=payment.amount_usd,
-                    reason="CryptoBot package top-up",
-                    related_payment_id=payment.id,
-                )
-                payment.paid_at = _parse_datetime(_optional_str(verified_invoice.get("paid_at")))
-                payment.paid_at = payment.paid_at or datetime.now(UTC)
-                user = await session.get(User, payment.user_id)
-                if user is not None:
-                    notification = (user.telegram_id, payment.amount_usd, account.available_usd)
-            payment.status = PaymentStatus.PAID.value
-        elif verified_status == "expired":
-            payment.status = PaymentStatus.EXPIRED.value
-
-        payment_id = payment.id
-        status = payment.status
-
-    if notification is not None:
-        telegram_id, amount, available = notification
-        await _notify_payment_success(telegram_id=telegram_id, amount=amount, available=available)
-
-    return PaymentWebhookResponse(ok=True, payment_id=payment_id, status=status)
+    result = await CryptoBotPaymentReconciliationService(
+        session,
+        settings=settings,
+        client=client,
+    ).reconcile_payment(provider_invoice_id=provider_invoice_id)
+    return PaymentWebhookResponse(ok=True, payment_id=result.payment_id, status=result.new_status)
 
 
 @router.post("/cryptomus/webhook", response_model=PaymentWebhookResponse)
@@ -347,23 +294,6 @@ async def _create_provider_invoice(
     )
 
 
-async def _get_payment_by_provider_invoice(
-    session: AsyncSession,
-    *,
-    provider: str,
-    provider_invoice_id: str,
-) -> Payment | None:
-    result = await session.execute(
-        select(Payment)
-        .where(
-            Payment.provider == provider,
-            Payment.provider_invoice_id == provider_invoice_id,
-        )
-        .with_for_update()
-    )
-    return result.scalar_one_or_none()
-
-
 async def _get_cryptomus_payment_for_webhook(
     session: AsyncSession,
     *,
@@ -432,27 +362,6 @@ def _validate_payment_package_record(payment: Payment) -> None:
         )
 
 
-def _validate_cryptobot_verified_invoice(
-    payment: Payment,
-    invoice: dict[str, object],
-    expected_asset: str,
-) -> None:
-    amount = invoice_amount(invoice)
-    if amount is None or amount != payment.amount_usd.quantize(Decimal("0.01")):
-        raise AppError(
-            "CryptoBot invoice amount does not match local payment",
-            code="cryptobot_amount_mismatch",
-            status_code=400,
-        )
-    asset = invoice_asset(invoice)
-    if asset is not None and asset.upper() != expected_asset.upper():
-        raise AppError(
-            "CryptoBot invoice asset does not match local payment",
-            code="cryptobot_asset_mismatch",
-            status_code=400,
-        )
-
-
 def _merge_payment_payload(
     existing: dict[str, object] | None,
     update: dict[str, object],
@@ -460,34 +369,6 @@ def _merge_payment_payload(
     base = dict(existing) if isinstance(existing, dict) else {}
     base.update(update)
     return base
-
-
-async def _notify_payment_success(
-    *,
-    telegram_id: int,
-    amount: Decimal,
-    available: Decimal,
-) -> None:
-    try:
-        await TelegramNotificationService().send_message(
-            telegram_id=telegram_id,
-            message=(
-                "✅ Баланс пополнен\n\n"
-                f"Зачислено: ${amount.quantize(Decimal('0.01'))}\n"
-                f"Текущий баланс: ${available.quantize(Decimal('0.0001'))}"
-            ),
-        )
-    except Exception:
-        logger.warning("Telegram payment notification failed telegram_id=%s", telegram_id)
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 def _optional_str(value: object) -> str | None:

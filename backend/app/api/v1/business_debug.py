@@ -101,8 +101,8 @@ async def top_up_business_account(
         message = (
             "✅ Баланс компании пополнен\n\n"
             f"Компания: {response_account.name}\n"
-            f"Зачислено: ${_money(payload.amount_usd)}\n"
-            f"Текущий баланс компании: ${_money(response_account.available_usd)}"
+            f"Зачислено: ${payload.amount_usd.quantize(Decimal('0.01'))}\n"
+            f"Текущий баланс компании: ${response_account.available_usd.quantize(Decimal('0.01'))}"
         )
         try:
             if await TelegramNotificationService().send_message(

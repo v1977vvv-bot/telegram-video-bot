@@ -19,6 +19,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 class GenerationNotification:
     telegram_id: int
     job_id: UUID
+    display_name: str | None
     audio_duration_seconds: Decimal | None
     price_usd: Decimal | None
     segments_count: int | None = None
@@ -36,44 +37,56 @@ class TelegramNotifyService:
 
     def send_generation_completed(self, notification: GenerationNotification) -> bool:
         text = (
-            "✅ Видео готово\n\n"
-            f"ID: {_short_id(notification.job_id)}\n"
-            f"Длительность: {_duration(notification.audio_duration_seconds)}\n"
-            f"{_segments_line(notification.segments_count)}"
-            f"Стоимость: ${_money(notification.price_usd)}"
+            "✅ Видео готово.\n\n"
+            f"Видео: {safe_html(_display_name(notification), max_len=90)}\n"
+            f"Списано: {_money(notification.price_usd)}"
         )
         reply_markup = None
         if notification.result_url:
             reply_markup = {
-                "inline_keyboard": [[{"text": "Скачать результат", "url": notification.result_url}]]
+                "inline_keyboard": [
+                    [{"text": "⬇️ Скачать результат", "url": notification.result_url}]
+                ]
             }
         return self._send_message(notification.telegram_id, text, reply_markup=reply_markup)
 
     def send_generation_failed(self, notification: GenerationNotification) -> bool:
-        reason = safe_html(notification.error_message, max_len=300) or "неизвестная ошибка"
-        text = (
-            "❌ Генерация не удалась\n\n"
-            f"ID: {_short_id(notification.job_id)}\n"
-            f"{_refund_line(notification.funds_returned)}\n"
-            f"Причина: {reason}"
-        )
+        if notification.funds_returned:
+            text = (
+                "⚠️ Не удалось завершить генерацию.\n\n"
+                f"Видео: {safe_html(_display_name(notification), max_len=90)}\n\n"
+                "Средства возвращены на баланс.\n"
+                "Попробуйте ещё раз или загрузите другое фото/аудио."
+            )
+        else:
+            text = (
+                "⚠️ Генерацию не удалось запустить.\n\n"
+                f"Видео: {safe_html(_display_name(notification), max_len=90)}\n\n"
+                "Средства не были списаны.\n"
+                "Попробуйте позже."
+            )
         return self._send_message(notification.telegram_id, text)
 
     def send_generation_waiting_for_gpu(self, notification: GenerationNotification) -> bool:
-        text = (
-            "⏳ GPU сейчас недоступен\n\n"
-            f"ID: {_short_id(notification.job_id)}\n"
-            "Задача поставлена в очередь. Средства зарезервированы, но не списаны.\n"
-            "Мы попробуем снова автоматически."
-        )
-        return self._send_message(notification.telegram_id, text)
+        return self._send_waiting_message(notification)
 
     def send_generation_waiting_for_pod(self, notification: GenerationNotification) -> bool:
         text = (
-            "⏳ Все GPU сейчас заняты\n\n"
-            f"ID: {_short_id(notification.job_id)}\n"
-            "Задача ожидает свободный GPU. Средства зарезервированы, но не списаны.\n"
-            "Мы попробуем снова автоматически."
+            "⏳ Серверы сейчас заняты.\n\n"
+            f"Видео: {safe_html(_display_name(notification), max_len=90)}\n\n"
+            "Задача ожидает свободный сервер.\n"
+            "Средства заморожены, но не списаны.\n\n"
+            "Если генерацию не удастся запустить, сумма вернётся на баланс."
+        )
+        return self._send_message(notification.telegram_id, text)
+
+    def _send_waiting_message(self, notification: GenerationNotification) -> bool:
+        text = (
+            "⏳ Серверы сейчас заняты.\n\n"
+            f"Видео: {safe_html(_display_name(notification), max_len=90)}\n\n"
+            "Задача ожидает свободный сервер.\n"
+            "Средства заморожены, но не списаны.\n\n"
+            "Если генерацию не удастся запустить, сумма вернётся на баланс."
         )
         return self._send_message(notification.telegram_id, text)
 
@@ -146,29 +159,17 @@ def _strip_control_chars(value: str) -> str:
     )
 
 
-def _short_id(job_id: UUID) -> str:
-    return str(job_id).split("-", maxsplit=1)[0]
+def _display_name(notification: GenerationNotification) -> str:
+    return notification.display_name or "Видео"
 
 
 def _duration(value: Decimal | None) -> str:
     if value is None:
         return "неизвестно"
-    return f"{value.quantize(Decimal('0.001'))} сек"
+    return f"{value.quantize(Decimal('0.1'))} сек"
 
 
 def _money(value: Decimal | None) -> str:
     if value is None:
-        return "0.0000"
-    return f"{value.quantize(Decimal('0.0001'))}"
-
-
-def _segments_line(segments_count: int | None) -> str:
-    if segments_count is None or segments_count <= 1:
-        return ""
-    return f"Сегментов: {segments_count}\n"
-
-
-def _refund_line(funds_returned: bool) -> str:
-    if funds_returned:
-        return "Средства возвращены на баланс."
-    return "Возврат средств требует проверки."
+        return "$0.00"
+    return f"${value.quantize(Decimal('0.01'))}"

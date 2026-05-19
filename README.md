@@ -166,6 +166,18 @@ CryptoBot webhooks are verified with the `crypto-pay-api-signature` HMAC header 
 then rechecked through `getInvoices` before any balance is credited. Duplicate paid
 webhooks are idempotent and do not double-credit the balance.
 
+If a CryptoBot payment was paid while the webhook was disabled, use the protected
+admin recheck action. It loads the local `cryptobot` payment, rechecks the provider
+invoice through CryptoBot, verifies invoice id, amount, and USDT asset, then credits
+the user balance once if the invoice is paid:
+
+```bash
+curl -u admin:replace_with_a_strong_password \
+  -X POST http://localhost:8000/api/v1/admin/payments/{payment_id}/recheck \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Recheck CryptoBot invoice after webhook was disabled"}'
+```
+
 Generation funds are reserved before generation and captured only after successful
 output upload. Failed generations refund the reserved balance. Business packages or
 direct support top-ups can be handled manually later through admin/manual balance
@@ -290,6 +302,7 @@ Stage 11.2 adds protected operator actions behind `ADMIN_ACTIONS_ENABLED=true`:
 - manual business balance top-up
 - add/deactivate business account members
 - fail/refund a generation job through the existing safe refund path
+- recheck pending CryptoBot payments after webhook downtime
 - retry waiting GPU/pod jobs
 - terminate non-busy managed RunPod pods
 - block/unblock users
@@ -301,6 +314,9 @@ curl -u admin:replace_with_a_strong_password \
   -X POST http://localhost:8000/api/v1/admin/users/{user_id}/balance/top-up \
   -H 'Content-Type: application/json' \
   -d '{"amount_usd":"10.00","reason":"Direct payment"}'
+
+# {user_id} should be the internal user UUID from /admin/users.
+# The endpoint also accepts a Telegram ID as a fallback for operator recovery.
 
 curl -u admin:replace_with_a_strong_password \
   -X POST http://localhost:8000/api/v1/admin/business-accounts/{id}/balance/top-up \
@@ -321,6 +337,11 @@ curl -u admin:replace_with_a_strong_password \
   -X POST http://localhost:8000/api/v1/admin/jobs/{job_id}/fail-refund \
   -H 'Content-Type: application/json' \
   -d '{"reason":"Manual refund after support review"}'
+
+curl -u admin:replace_with_a_strong_password \
+  -X POST http://localhost:8000/api/v1/admin/payments/{payment_id}/recheck \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Recheck CryptoBot invoice after webhook downtime"}'
 
 curl -u admin:replace_with_a_strong_password \
   -X POST http://localhost:8000/api/v1/admin/jobs/retry-waiting \
@@ -1022,9 +1043,10 @@ Current limitations:
 ## Telegram notifications
 
 After a worker job finishes, the worker sends a Telegram notification through the
-Bot API. Completed jobs get `✅ Видео готово` with duration, price, and a download
-button when a result URL is available. Failed jobs get `❌ Генерация не удалась`
-with a short escaped error and a balance-return note.
+Bot API. User-facing notifications use a short video display name derived from the
+uploaded photo and audio filenames. Completed jobs get `✅ Видео готово` with the
+display name, charged amount, and a download button when a result URL is available.
+Failed jobs use non-technical copy and mention whether funds were returned.
 
 Notification failures are logged as warnings and never change generation job status
 or balance ledger results.
@@ -1035,6 +1057,24 @@ Test Telegram notifications locally:
 curl -X POST http://localhost:8000/api/v1/debug/telegram/test-notification \
   -H "Content-Type: application/json" \
   -d '{"telegram_id": 123456789, "message": "test notification"}'
+```
+
+Recommended BotFather copy:
+
+- Bot name: `SynzAI`
+- About: `AI-видеоаватары из фото и голоса.`
+- Description:
+
+```text
+SynzAI создаёт AI-видеоаватары из фото и аудио. Загрузите изображение, добавьте голос — и получите готовое видео с говорящим аватаром. Подходит для контента, бизнеса, обучения и презентаций.
+```
+
+- Welcome:
+
+```text
+Создавайте AI-видеоаватары из фото и голоса.
+
+Загрузите изображение, добавьте аудио — SynzAI сгенерирует готовое видео с говорящим аватаром.
 ```
 
 The backend keeps async SQLAlchemy with asyncpg. The Celery worker intentionally uses

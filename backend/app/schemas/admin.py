@@ -265,6 +265,24 @@ class RetryWaitingJobsRequest(BaseModel):
     reason: str
 
 
+class PaymentRecheckRequest(BaseModel):
+    reason: str
+
+
+class PaymentRecheckResponse(BaseModel):
+    payment_id: UUID
+    provider: str
+    provider_invoice_id: str | None
+    old_status: str
+    new_status: str
+    credited: bool
+    credited_amount_usd: Decimal | None = None
+    message: str
+    audit_log_id: UUID | None = None
+    telegram_notification_sent: bool | None = None
+    warning: str | None = None
+
+
 class UserBlockRequest(BaseModel):
     reason: str
 

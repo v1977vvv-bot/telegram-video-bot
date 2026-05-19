@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.formats import AVAILABLE_GENERATION_FORMATS, is_available_format
 from backend.app.models.generation_job import GenerationJob
 from backend.app.models.generation_segment import GenerationSegment
+from backend.app.models.uploaded_file import UploadedFile
 from backend.app.models.user import User
 from backend.app.repositories.generation_jobs import GenerationJobRepository
 from backend.app.repositories.users import UserRepository
@@ -23,6 +24,7 @@ from backend.app.services.storage import StorageServiceFactory
 from shared.app.config import Settings, get_settings
 from shared.app.enums import BillingAccountType, FileType, JobStatus, SegmentStatus
 from shared.app.exceptions import AppError
+from shared.app.job_names import build_job_display_name
 from shared.app.storage import validated_extension
 
 
@@ -43,6 +45,7 @@ class GenerationFormatDto:
 @dataclass(frozen=True, slots=True)
 class DraftSummary:
     job_id: UUID
+    display_name: str
     status: str
     audio_duration_seconds: Decimal
     segments_count: int
@@ -54,6 +57,7 @@ class DraftSummary:
 @dataclass(frozen=True, slots=True)
 class FormatSummary:
     job_id: UUID
+    display_name: str
     status: str
     width: int
     height: int
@@ -66,6 +70,7 @@ class FormatSummary:
 @dataclass(frozen=True, slots=True)
 class ConfirmationSummary:
     job_id: UUID
+    display_name: str
     status: str
     price_usd: Decimal
     message: str
@@ -157,6 +162,11 @@ class GenerationService:
 
                 return DraftSummary(
                     job_id=job.id,
+                    display_name=build_job_display_name(
+                        image_filename=image_file.original_filename,
+                        audio_filename=audio_file.original_filename,
+                        created_at=datetime.now(UTC),
+                    ),
                     status=job.status,
                     audio_duration_seconds=duration,
                     segments_count=len(segment_plans),
@@ -200,7 +210,7 @@ class GenerationService:
                 raise AppError("Only draft jobs can be edited", code="job_not_editable")
             job.width = width
             job.height = height
-            return self._format_summary(job)
+            return await self._format_summary(job)
 
     async def confirm_draft(self, *, job_id: UUID, telegram_id: int) -> ConfirmationSummary:
         async with self._session.begin():
@@ -249,6 +259,7 @@ class GenerationService:
 
             return ConfirmationSummary(
                 job_id=job.id,
+                display_name=await self.get_job_display_name(job),
                 status=job.status,
                 price_usd=job.price_usd,
                 message="Задача поставлена в очередь",
@@ -301,6 +312,7 @@ class GenerationService:
 
             return ConfirmationSummary(
                 job_id=job.id,
+                display_name=await self.get_job_display_name(job),
                 status=job.status,
                 price_usd=job.price_usd or Decimal("0.0000"),
                 message="Генерация отменена",
@@ -312,6 +324,15 @@ class GenerationService:
     async def get_job_detail(self, *, job_id: UUID, telegram_id: int) -> GenerationJob:
         user = await self._get_active_user(telegram_id)
         return await self._get_owned_job(job_id, user.id, with_segments=True)
+
+    async def get_job_display_name(self, job: GenerationJob) -> str:
+        image_file = await self._session.get(UploadedFile, job.source_image_file_id)
+        audio_file = await self._session.get(UploadedFile, job.source_audio_file_id)
+        return build_job_display_name(
+            image_filename=image_file.original_filename if image_file else None,
+            audio_filename=audio_file.original_filename if audio_file else None,
+            created_at=job.created_at,
+        )
 
     async def _get_active_user(self, telegram_id: int) -> User:
         user = await self._user_repository.get_by_telegram_id(self._session, telegram_id)
@@ -360,11 +381,12 @@ class GenerationService:
             input_image_file_id=image_file_id,
         )
 
-    def _format_summary(self, job: GenerationJob) -> FormatSummary:
+    async def _format_summary(self, job: GenerationJob) -> FormatSummary:
         if job.audio_duration_seconds is None or job.price_usd is None:
             raise AppError("Draft is incomplete", code="incomplete_draft")
         return FormatSummary(
             job_id=job.id,
+            display_name=await self.get_job_display_name(job),
             status=job.status,
             width=job.width,
             height=job.height,

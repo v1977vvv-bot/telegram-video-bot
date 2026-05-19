@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 class GenerationHistoryItemResponse(BaseModel):
     id: UUID
+    display_name: str
     status: str
     width: int
     height: int

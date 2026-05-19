@@ -82,6 +82,7 @@ async def get_user_generations(
         items=[
             GenerationHistoryItemResponse(
                 id=item.id,
+                display_name=item.display_name,
                 status=item.status,
                 width=item.width,
                 height=item.height,

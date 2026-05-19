@@ -11,6 +11,7 @@ from backend.app.schemas.settings import AvailableFormatResponse
 
 class GenerationDraftResponse(BaseModel):
     job_id: UUID
+    display_name: str
     status: str
     audio_duration_seconds: Decimal
     segments_count: int
@@ -27,6 +28,7 @@ class GenerationFormatRequest(BaseModel):
 
 class GenerationFormatResponse(BaseModel):
     job_id: UUID
+    display_name: str
     status: str
     width: int
     height: int
@@ -42,6 +44,7 @@ class TelegramUserJobRequest(BaseModel):
 
 class GenerationConfirmResponse(BaseModel):
     job_id: UUID
+    display_name: str
     status: str
     price_usd: Decimal
     message: str
@@ -59,6 +62,7 @@ class GenerationSegmentDetailResponse(BaseModel):
 
 class GenerationJobDetailResponse(BaseModel):
     job_id: UUID
+    display_name: str
     status: str
     width: int
     height: int
