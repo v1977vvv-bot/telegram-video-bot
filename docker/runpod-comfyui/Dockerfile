@@ -1,0 +1,57 @@
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PATH="/opt/venv/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-venv \
+    git \
+    git-lfs \
+    ffmpeg \
+    build-essential \
+    cmake \
+    ninja-build \
+    wget \
+    curl \
+    ca-certificates \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+RUN python3 -m venv /opt/venv
+RUN pip install --upgrade pip setuptools wheel
+
+RUN git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI
+
+WORKDIR /workspace/ComfyUI
+
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+RUN pip install -r requirements.txt
+
+# Critical deps that failed in the RunPod startup logs.
+RUN pip install insightface==0.7.3 onnxruntime-gpu
+
+WORKDIR /workspace/ComfyUI/custom_nodes
+
+RUN git clone https://github.com/ltdrdata/ComfyUI-Manager.git
+RUN git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
+RUN git clone https://github.com/kijai/ComfyUI-KJNodes.git
+RUN git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git
+
+RUN find /workspace/ComfyUI/custom_nodes -name requirements.txt -print -exec pip install -r {} \; || true
+
+WORKDIR /workspace/ComfyUI
+
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
+EXPOSE 8188
+
+CMD ["/start.sh"]
