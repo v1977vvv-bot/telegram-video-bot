@@ -35,7 +35,6 @@ WORKDIR /workspace/ComfyUI
 RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 RUN pip install -r requirements.txt
 
-# Critical deps that failed in the RunPod startup logs.
 RUN pip install insightface==0.7.3 onnxruntime-gpu
 
 WORKDIR /workspace/ComfyUI/custom_nodes
@@ -49,8 +48,9 @@ RUN find /workspace/ComfyUI/custom_nodes -name requirements.txt -print -exec pip
 
 WORKDIR /workspace/ComfyUI
 
+COPY download_models.sh /download_models.sh
 COPY start.sh /start.sh
-RUN chmod +x /start.sh
+RUN chmod +x /download_models.sh /start.sh
 
 EXPOSE 8188
 
