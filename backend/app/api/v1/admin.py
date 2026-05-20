@@ -27,6 +27,7 @@ from backend.app.models.business_account import BusinessAccount
 from backend.app.models.business_account_member import BusinessAccountMember
 from backend.app.models.business_balance_transaction import BusinessBalanceTransaction
 from backend.app.models.generation_job import GenerationJob
+from backend.app.models.generation_segment import GenerationSegment
 from backend.app.models.payment import Payment
 from backend.app.models.runpod_pod import RunpodPod
 from backend.app.models.user import User
@@ -959,6 +960,8 @@ async def _admin_job_item(
         created_at=job.created_at,
         updated_at=job.updated_at,
         runpod_pod_id=pod.runpod_pod_id if pod is not None else None,
+        runpod_cloud_type=pod.cloud_type if pod is not None else None,
+        runpod_gpu_type=pod.gpu_type if pod is not None else None,
         runpod_base_url=pod.base_url if pod is not None else None,
         error_message=_truncate(job.error_message, 500),
     )
@@ -999,6 +1002,7 @@ def _admin_runpod_pod_item(pod: RunpodPod) -> AdminRunPodPodItem:
         provider_pod_id=pod.provider_pod_id,
         name=pod.name,
         status=pod.status,
+        cloud_type=pod.cloud_type,
         gpu_type=pod.gpu_type,
         base_url=pod.base_url,
         active_job_id=pod.active_job_id or pod.current_job_id,
@@ -1008,6 +1012,8 @@ def _admin_runpod_pod_item(pod: RunpodPod) -> AdminRunPodPodItem:
         last_used_at=pod.last_used_at,
         terminated_at=pod.terminated_at,
         estimated_runtime_seconds=_pod_runtime_seconds(pod),
+        estimated_hourly_cost_usd=_pod_estimated_hourly_cost(pod),
+        estimated_startup_surcharge_usd=_pod_estimated_startup_surcharge(pod),
         estimated_cost_usd=_pod_estimated_cost(pod),
     )
 
@@ -1218,7 +1224,18 @@ async def _pod_for_job(session: AsyncSession, job_id: UUID) -> RunpodPod | None:
         .order_by(desc(RunpodPod.updated_at))
         .limit(1)
     )
-    return result.scalar_one_or_none()
+    pod = result.scalar_one_or_none()
+    if pod is not None:
+        return pod
+
+    segment_result = await session.execute(
+        select(RunpodPod)
+        .join(GenerationSegment, GenerationSegment.runpod_pod_id == RunpodPod.runpod_pod_id)
+        .where(GenerationSegment.job_id == job_id)
+        .order_by(desc(GenerationSegment.updated_at), desc(RunpodPod.updated_at))
+        .limit(1)
+    )
+    return segment_result.scalar_one_or_none()
 
 
 async def _count_anomalies(session: AsyncSession) -> int:
@@ -1517,11 +1534,23 @@ def _pod_estimated_cost(pod: RunpodPod) -> Decimal | None:
         return None
     ended_at = pod.terminated_at or datetime.now(UTC)
     return RunPodCostService().calculate_runpod_cost_usd(
+        cloud_type=pod.cloud_type,
         gpu_type=pod.gpu_type,
         started_at=pod.created_at,
         ended_at=ended_at,
         min_billing_seconds=0,
     )
+
+
+def _pod_estimated_hourly_cost(pod: RunpodPod) -> Decimal | None:
+    return RunPodCostService().get_cloud_gpu_hourly_cost(
+        cloud_type=pod.cloud_type,
+        gpu_type=pod.gpu_type,
+    )
+
+
+def _pod_estimated_startup_surcharge(pod: RunpodPod) -> Decimal | None:
+    return RunPodCostService().get_startup_surcharge(cloud_type=pod.cloud_type)
 
 
 def _money(value: Any) -> Decimal:

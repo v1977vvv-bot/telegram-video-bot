@@ -323,7 +323,7 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
                     job_id,
                     segment.segment_index,
                 )
-            _mark_segment_generating(segment.id)
+            _mark_segment_generating(segment.id, runpod_pod_id=endpoint.runpod_pod_id)
             segment_path = _generate_comfyui_segment(
                 client=client,
                 settings=settings,
@@ -441,29 +441,34 @@ def _record_runpod_job_cost(
                 job = session.get(GenerationJob, job_id, with_for_update=True)
                 if job is None:
                     return
+                cloud_type: str | None = None
                 gpu_type: str | None = None
                 if endpoint.db_pod_id is not None:
                     pod = session.get(RunpodPod, endpoint.db_pod_id)
                     if pod is not None:
+                        cloud_type = pod.cloud_type
                         gpu_type = pod.gpu_type
                 cost_service = RunPodCostService(settings)
-                cost_usd = cost_service.calculate_runpod_cost_usd(
+                estimate = cost_service.estimate_runpod_cost_usd(
+                    cloud_type=cloud_type,
                     gpu_type=gpu_type,
                     started_at=started_at,
                     ended_at=ended_at,
                     min_billing_seconds=settings.runpod_cost_min_billing_seconds,
                 )
-                runtime_seconds = cost_service.runtime_seconds(
-                    started_at=started_at,
-                    ended_at=ended_at,
-                )
+                cost_usd = estimate.total_cost_usd
                 job.cost_usd = cost_usd
                 logger.info(
-                    "RunPod estimated job cost job_id=%s gpu_type=%s runtime_seconds=%s "
-                    "cost_usd=%s",
+                    "RunPod estimated job cost job_id=%s cloud_type=%s gpu_type=%s "
+                    "runtime_seconds=%s billable_seconds=%s hourly_cost_usd=%s "
+                    "startup_surcharge_usd=%s cost_usd=%s",
                     job_id,
+                    cloud_type,
                     gpu_type,
-                    runtime_seconds,
+                    estimate.runtime_seconds,
+                    estimate.billable_seconds,
+                    estimate.hourly_cost_usd,
+                    estimate.startup_surcharge_usd,
                     cost_usd,
                 )
     except Exception:
@@ -1139,7 +1144,7 @@ def _build_final_video(
     return trimmed_path
 
 
-def _mark_segment_generating(segment_id: UUID) -> None:
+def _mark_segment_generating(segment_id: UUID, runpod_pod_id: str | None = None) -> None:
     with get_worker_session() as session:
         with session.begin():
             segment = session.get(GenerationSegment, segment_id, with_for_update=True)
@@ -1147,6 +1152,8 @@ def _mark_segment_generating(segment_id: UUID) -> None:
                 raise RuntimeError(f"Generation segment not found segment_id={segment_id}")
             segment.status = SegmentStatus.GENERATING.value
             segment.started_at = datetime.now(UTC)
+            if runpod_pod_id:
+                segment.runpod_pod_id = runpod_pod_id
             segment.error_message = None
 
 

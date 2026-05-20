@@ -181,6 +181,8 @@ class DebugRunPodPodResponse(BaseModel):
     updated_at: datetime
     terminated_at: datetime | None
     estimated_runtime_seconds: int | None = None
+    estimated_hourly_cost_usd: Decimal | None = None
+    estimated_startup_surcharge_usd: Decimal | None = None
     estimated_cost_usd: Decimal | None = None
 
 
@@ -189,6 +191,8 @@ class DebugRunPodPodsResponse(BaseModel):
 
 
 class DebugRunPodGpuAttemptResponse(BaseModel):
+    cloud_type: str | None = None
+    cloud_phase: str | None = None
     phase: str
     attempt: int
     gpu_type: str
@@ -200,6 +204,7 @@ class DebugRunPodGpuAttemptResponse(BaseModel):
 class DebugRunPodCreatePodResponse(BaseModel):
     pod: DebugRunPodPodResponse
     selected_gpu_type: str
+    selected_cloud_type: str | None = None
     selected_min_ram_gb: int | None = None
     selected_resource_phase: str | None = None
     attempt: int
@@ -280,6 +285,8 @@ class DebugGenerationJobListItemResponse(BaseModel):
     refunded: bool
     captured: bool
     runpod_pod_id: str | None
+    runpod_cloud_type: str | None
+    runpod_gpu_type: str | None
     runpod_base_url: str | None
 
 

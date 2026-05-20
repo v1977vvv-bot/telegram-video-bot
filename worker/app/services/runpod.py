@@ -39,6 +39,7 @@ class RunPodPodInfo:
     pod_id: str
     name: str | None
     status: str | None
+    cloud_type: str | None
     gpu_type: str | None
     base_url: str
     raw: dict[str, Any]
@@ -66,27 +67,64 @@ class RunPodClient:
         if self._owns_client:
             self._client.close()
 
-    def create_pod(self, gpu_type: str, min_ram_gb: int | None = None) -> RunPodPodInfo:
+    def create_pod(
+        self,
+        gpu_type: str,
+        min_ram_gb: int | None = None,
+        *,
+        cloud_type: str | None = None,
+    ) -> RunPodPodInfo:
         resolved_min_ram_gb = min_ram_gb or self._settings.runpod_min_ram_gb
-        payload = self.build_create_pod_payload(gpu_type, min_ram_gb=resolved_min_ram_gb)
+        resolved_cloud_type = cloud_type or self._settings.runpod_primary_cloud_type
+        payload = self.build_create_pod_payload(
+            gpu_type,
+            min_ram_gb=resolved_min_ram_gb,
+            cloud_type=resolved_cloud_type,
+        )
         logger.info(
-            "RunPod pod create requested gpu_type=%s min_ram_gb=%s",
+            "RunPod pod create requested cloud_type=%s gpu_type=%s min_ram_gb=%s",
+            resolved_cloud_type,
             gpu_type,
             resolved_min_ram_gb,
         )
-        response = self._client.post("/pods", json=payload, headers=self._headers())
+        try:
+            response = self._client.post("/pods", json=payload, headers=self._headers())
+        except httpx.TimeoutException as exc:
+            raise RunPodCapacityError(
+                f"RunPod create request timed out for cloud_type={resolved_cloud_type} "
+                f"gpu_type={gpu_type} min_ram_gb={resolved_min_ram_gb}"
+            ) from exc
+        except httpx.TransportError as exc:
+            raise RunPodCapacityError(
+                f"RunPod create request failed for cloud_type={resolved_cloud_type} "
+                f"gpu_type={gpu_type} min_ram_gb={resolved_min_ram_gb}: {exc.__class__.__name__}"
+            ) from exc
         if _is_capacity_error(response):
             body = _safe_response_body(response)
             details = f": {body}" if body else ""
             raise RunPodCapacityError(
-                f"RunPod capacity unavailable for gpu_type={gpu_type} "
+                f"RunPod capacity unavailable for cloud_type={resolved_cloud_type} "
+                f"gpu_type={gpu_type} "
+                f"min_ram_gb={resolved_min_ram_gb}: {_http_status_summary(response)}{details}"
+            )
+        if _is_retryable_create_error(response):
+            body = _safe_response_body(response)
+            details = f": {body}" if body else ""
+            raise RunPodCapacityError(
+                f"RunPod create transient failure for cloud_type={resolved_cloud_type} "
+                f"gpu_type={gpu_type} "
                 f"min_ram_gb={resolved_min_ram_gb}: {_http_status_summary(response)}{details}"
             )
         self._raise_for_response(response, "RunPod pod create failed")
-        info = self._pod_info_from_response(response.json(), fallback_gpu_type=gpu_type)
+        info = self._pod_info_from_response(
+            response.json(),
+            fallback_cloud_type=resolved_cloud_type,
+            fallback_gpu_type=gpu_type,
+        )
         logger.info(
-            "RunPod pod created pod_id=%s gpu_type=%s min_ram_gb=%s",
+            "RunPod pod created pod_id=%s cloud_type=%s gpu_type=%s min_ram_gb=%s",
             info.pod_id,
+            info.cloud_type or resolved_cloud_type,
             gpu_type,
             resolved_min_ram_gb,
         )
@@ -110,13 +148,15 @@ class RunPodClient:
         gpu_type: str,
         *,
         min_ram_gb: int | None = None,
+        cloud_type: str | None = None,
     ) -> dict[str, Any]:
         """Build the RunPod /pods payload without Network Volume fields."""
 
         resolved_min_ram_gb = min_ram_gb or self._settings.runpod_min_ram_gb
+        resolved_cloud_type = cloud_type or self._settings.runpod_primary_cloud_type
         payload: dict[str, Any] = {
             "name": f"ultronlab-comfyui-{uuid4().hex[:8]}",
-            "cloudType": self._settings.runpod_cloud_type,
+            "cloudType": resolved_cloud_type,
             "computeType": "GPU",
             "gpuTypeIds": [gpu_type],
             "gpuCount": 1,
@@ -151,6 +191,7 @@ class RunPodClient:
         data: Any,
         *,
         fallback_pod_id: str | None = None,
+        fallback_cloud_type: str | None = None,
         fallback_gpu_type: str | None = None,
     ) -> RunPodPodInfo:
         if not isinstance(data, dict):
@@ -170,6 +211,7 @@ class RunPodClient:
             pod_id=pod_id,
             name=_first_string(payload, "name"),
             status=_first_string(payload, "desiredStatus", "status"),
+            cloud_type=_first_string(payload, "cloudType", "cloud_type") or fallback_cloud_type,
             gpu_type=gpu_type,
             base_url=self.build_comfyui_base_url(pod_id),
             raw=payload,
@@ -225,6 +267,19 @@ def _is_capacity_error(response: httpx.Response) -> bool:
         return False
 
     return any(marker in body for marker in _CAPACITY_ERROR_MARKERS)
+
+
+def _is_retryable_create_error(response: httpx.Response) -> bool:
+    if response.status_code in {401, 403}:
+        return False
+    if response.status_code == 400:
+        body = _safe_response_body(response).lower()
+        if any(
+            marker in body
+            for marker in ("invalid", "schema", "not a valid", "must be one of", "malformed")
+        ):
+            return False
+    return response.status_code in {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524}
 
 
 _CAPACITY_ERROR_MARKERS = (

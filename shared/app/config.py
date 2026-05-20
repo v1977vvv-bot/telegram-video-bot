@@ -96,17 +96,20 @@ class Settings(BaseSettings):
     runpod_idle_timeout_seconds: int = 600
     runpod_max_active_pods: int = 1
     runpod_cloud_type: str = "COMMUNITY"
-    runpod_allowed_gpu_types: str = "NVIDIA GeForce RTX 5090,NVIDIA GeForce RTX 4090"
+    runpod_primary_cloud_type: str = "SECURE"
+    runpod_fallback_cloud_type: str = "COMMUNITY"
+    runpod_allowed_gpu_types: str = "NVIDIA GeForce RTX 4090"
+    runpod_fallback_allowed_gpu_types: str = "NVIDIA GeForce RTX 4090"
     runpod_min_vcpu: int = 8
     runpod_min_ram_gb: int = 48
     runpod_fallback_min_ram_gb: int | None = 48
-    runpod_container_disk_gb: int = 50
-    runpod_volume_disk_gb: int = 100
+    runpod_container_disk_gb: int = 100
+    runpod_volume_disk_gb: int = 0
     runpod_cuda_version: str = "12.8"
     runpod_comfyui_port: int = 8188
     runpod_pod_idle_shutdown_minutes: int = 20
-    runpod_pod_ready_timeout_seconds: int = 900
-    runpod_healthcheck_interval_seconds: int = 10
+    runpod_pod_ready_timeout_seconds: int = 7200
+    runpod_healthcheck_interval_seconds: int = 15
     runpod_auto_terminate: bool = True
     runpod_keeper_enabled: bool = True
     runpod_keeper_interval_seconds: int = 120
@@ -127,12 +130,19 @@ class Settings(BaseSettings):
     runpod_short_job_cold_start_avoidance_enabled: bool = True
     runpod_short_job_max_duration_seconds: int = 90
     runpod_create_max_attempts: int = 3
+    runpod_primary_create_max_attempts: int = 3
+    runpod_fallback_create_max_attempts: int = 6
     runpod_create_retry_sleep_seconds: int = 20
     runpod_cost_tracking_enabled: bool = True
     runpod_default_hourly_cost_usd: Decimal = Field(default=Decimal("0.80"))
-    runpod_gpu_hourly_costs_usd: str = (
-        "NVIDIA GeForce RTX 5090:0.80,NVIDIA L40S:0.75,NVIDIA GeForce RTX 4090:0.55"
-    )
+    runpod_gpu_hourly_costs_usd: str = "NVIDIA L40S:0.75,NVIDIA GeForce RTX 4090:0.55"
+    runpod_secure_gpu_price_per_hour_usd: str = ""
+    runpod_community_gpu_price_per_hour_usd: str = ""
+    runpod_secure_startup_surcharge_usd: str = "0"
+    runpod_community_cold_start_surcharge_usd: str = ""
+    runpod_secure_storage_price_per_gb_month_usd: str = ""
+    runpod_community_storage_price_per_gb_month_usd: str = "0"
+    runpod_billing_margin_percent: str = ""
     runpod_cost_include_cold_start: bool = True
     runpod_cost_include_idle_time: bool = False
     runpod_cost_min_billing_seconds: int = 60
@@ -241,6 +251,14 @@ class Settings(BaseSettings):
         return [item.strip() for item in self.runpod_allowed_gpu_types.split(",") if item.strip()]
 
     @property
+    def runpod_fallback_allowed_gpu_type_list(self) -> list[str]:
+        return [
+            item.strip()
+            for item in self.runpod_fallback_allowed_gpu_types.split(",")
+            if item.strip()
+        ]
+
+    @property
     def runpod_auto_manager_enabled(self) -> bool:
         api_key = self.runpod_api_key.strip()
         template_id = self.runpod_template_id.strip()
@@ -284,6 +302,45 @@ class Settings(BaseSettings):
         return costs
 
     @property
+    def runpod_secure_gpu_price_per_hour(self) -> Decimal | None:
+        return _optional_nonnegative_decimal(self.runpod_secure_gpu_price_per_hour_usd)
+
+    @property
+    def runpod_community_gpu_price_per_hour(self) -> Decimal | None:
+        return _optional_nonnegative_decimal(self.runpod_community_gpu_price_per_hour_usd)
+
+    @property
+    def runpod_secure_startup_surcharge(self) -> Decimal:
+        return _optional_nonnegative_decimal(self.runpod_secure_startup_surcharge_usd) or Decimal(
+            "0"
+        )
+
+    @property
+    def runpod_community_cold_start_surcharge(self) -> Decimal:
+        return _optional_nonnegative_decimal(
+            self.runpod_community_cold_start_surcharge_usd
+        ) or Decimal("0")
+
+    @property
+    def runpod_secure_storage_price_per_gb_month(self) -> Decimal | None:
+        return _optional_nonnegative_decimal(self.runpod_secure_storage_price_per_gb_month_usd)
+
+    @property
+    def runpod_community_storage_price_per_gb_month(self) -> Decimal | None:
+        return _optional_nonnegative_decimal(self.runpod_community_storage_price_per_gb_month_usd)
+
+    @property
+    def runpod_billing_margin_percent_value(self) -> Decimal | None:
+        return _optional_nonnegative_decimal(self.runpod_billing_margin_percent)
+
+    @property
+    def runpod_cloud_specific_pricing_configured(self) -> bool:
+        return (
+            self.runpod_secure_gpu_price_per_hour is not None
+            and self.runpod_community_gpu_price_per_hour is not None
+        )
+
+    @property
     def payment_package_amounts_usd(self) -> list[Decimal]:
         amounts: list[Decimal] = []
         for raw_amount in self.payment_packages_usd.split(","):
@@ -319,3 +376,18 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+def _optional_nonnegative_decimal(raw_value: str | Decimal | int | float | None) -> Decimal | None:
+    if raw_value is None:
+        return None
+    raw = str(raw_value).strip()
+    if not raw:
+        return None
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError(f"Invalid decimal value: {raw}") from exc
+    if value < Decimal("0"):
+        raise ValueError(f"Decimal value must be non-negative: {raw}")
+    return value

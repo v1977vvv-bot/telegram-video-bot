@@ -59,6 +59,7 @@ async def get_ops_status(session: SessionDep, response: Response) -> OpsStatusRe
         worker_queue="not_checked",
         jobs=jobs,
         runpod_pods=runpod_pods,
+        runpod_config=_runpod_config_ops_status(settings),
         runpod_costs=_runpod_cost_ops_status(settings),
         payments=_payment_ops_status(settings),
         business=business,
@@ -142,10 +143,46 @@ def _runpod_cost_ops_status(settings) -> dict[str, object]:
         known_gpu_cost_count = len(RunPodCostService(settings).parse_gpu_hourly_costs())
     except Exception:
         known_gpu_cost_count = 0
+    secure_gpu_price = settings.runpod_secure_gpu_price_per_hour
+    community_gpu_price = settings.runpod_community_gpu_price_per_hour
+    secure_storage_price = settings.runpod_secure_storage_price_per_gb_month
+    community_storage_price = settings.runpod_community_storage_price_per_gb_month
+    billing_margin = settings.runpod_billing_margin_percent_value
     return {
         "tracking_enabled": settings.runpod_cost_tracking_enabled,
         "default_hourly_cost_usd": str(settings.runpod_default_hourly_cost_usd),
         "known_gpu_cost_count": known_gpu_cost_count,
         "include_cold_start": settings.runpod_cost_include_cold_start,
         "include_idle_time": settings.runpod_cost_include_idle_time,
+        "cloud_specific_pricing_configured": settings.runpod_cloud_specific_pricing_configured,
+        "secure_gpu_price_per_hour_usd": (
+            str(secure_gpu_price) if secure_gpu_price is not None else None
+        ),
+        "community_gpu_price_per_hour_usd": (
+            str(community_gpu_price) if community_gpu_price is not None else None
+        ),
+        "secure_startup_surcharge_usd": str(settings.runpod_secure_startup_surcharge),
+        "community_cold_start_surcharge_usd": str(settings.runpod_community_cold_start_surcharge),
+        "secure_storage_price_per_gb_month_usd": (
+            str(secure_storage_price) if secure_storage_price is not None else None
+        ),
+        "community_storage_price_per_gb_month_usd": (
+            str(community_storage_price) if community_storage_price is not None else None
+        ),
+        "billing_margin_percent": str(billing_margin) if billing_margin is not None else None,
+    }
+
+
+def _runpod_config_ops_status(settings) -> dict[str, object]:
+    return {
+        "primary_cloud_type": settings.runpod_primary_cloud_type,
+        "fallback_cloud_type": settings.runpod_fallback_cloud_type,
+        "allowed_gpu_types": settings.runpod_allowed_gpu_type_list,
+        "fallback_allowed_gpu_types": settings.runpod_fallback_allowed_gpu_type_list,
+        "primary_create_max_attempts": settings.runpod_primary_create_max_attempts,
+        "fallback_create_max_attempts": settings.runpod_fallback_create_max_attempts,
+        "pod_ready_timeout_seconds": settings.runpod_pod_ready_timeout_seconds,
+        "healthcheck_interval_seconds": settings.runpod_healthcheck_interval_seconds,
+        "container_disk_gb": settings.runpod_container_disk_gb,
+        "volume_disk_gb": settings.runpod_volume_disk_gb,
     }

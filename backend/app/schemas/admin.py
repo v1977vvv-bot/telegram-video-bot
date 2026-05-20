@@ -98,6 +98,8 @@ class AdminJobListItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     runpod_pod_id: str | None
+    runpod_cloud_type: str | None
+    runpod_gpu_type: str | None
     runpod_base_url: str | None
     error_message: str | None
 
@@ -136,6 +138,7 @@ class AdminRunPodPodItem(BaseModel):
     provider_pod_id: str
     name: str | None
     status: str
+    cloud_type: str | None
     gpu_type: str | None
     base_url: str | None
     active_job_id: UUID | None
@@ -145,6 +148,8 @@ class AdminRunPodPodItem(BaseModel):
     last_used_at: datetime | None
     terminated_at: datetime | None
     estimated_runtime_seconds: int | None
+    estimated_hourly_cost_usd: Decimal | None
+    estimated_startup_surcharge_usd: Decimal | None
     estimated_cost_usd: Decimal | None
 
 

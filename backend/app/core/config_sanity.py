@@ -153,6 +153,10 @@ def _require_production_safety_defaults(
         result.errors.append("RUNPOD_WAITING_GPU_ENABLED must be true for production launch")
     if not settings.runpod_queue_wait_enabled:
         result.errors.append("RUNPOD_QUEUE_WAIT_ENABLED must be true for production launch")
+    if _contains_rtx_5090(settings.runpod_allowed_gpu_type_list):
+        result.errors.append("RUNPOD_ALLOWED_GPU_TYPES must not include RTX 5090")
+    if _contains_rtx_5090(settings.runpod_fallback_allowed_gpu_type_list):
+        result.errors.append("RUNPOD_FALLBACK_ALLOWED_GPU_TYPES must not include RTX 5090")
 
 
 def _require_payment_package_config(result: ConfigSanityResult, settings: Settings) -> None:
@@ -297,6 +301,31 @@ def _runpod_cost_config_errors(settings: Settings) -> list[str]:
         _ = settings.runpod_gpu_hourly_costs_map
     except (ArithmeticError, ValueError) as exc:
         errors.append(f"RUNPOD_GPU_HOURLY_COSTS_USD is invalid: {exc}")
+    for name, getter in (
+        ("RUNPOD_SECURE_GPU_PRICE_PER_HOUR_USD", lambda: settings.runpod_secure_gpu_price_per_hour),
+        (
+            "RUNPOD_COMMUNITY_GPU_PRICE_PER_HOUR_USD",
+            lambda: settings.runpod_community_gpu_price_per_hour,
+        ),
+        ("RUNPOD_SECURE_STARTUP_SURCHARGE_USD", lambda: settings.runpod_secure_startup_surcharge),
+        (
+            "RUNPOD_COMMUNITY_COLD_START_SURCHARGE_USD",
+            lambda: settings.runpod_community_cold_start_surcharge,
+        ),
+        (
+            "RUNPOD_SECURE_STORAGE_PRICE_PER_GB_MONTH_USD",
+            lambda: settings.runpod_secure_storage_price_per_gb_month,
+        ),
+        (
+            "RUNPOD_COMMUNITY_STORAGE_PRICE_PER_GB_MONTH_USD",
+            lambda: settings.runpod_community_storage_price_per_gb_month,
+        ),
+        ("RUNPOD_BILLING_MARGIN_PERCENT", lambda: settings.runpod_billing_margin_percent_value),
+    ):
+        try:
+            getter()
+        except (ArithmeticError, ValueError) as exc:
+            errors.append(f"{name} is invalid: {exc}")
     if settings.runpod_cost_min_billing_seconds < 0:
         errors.append("RUNPOD_COST_MIN_BILLING_SECONDS must be >= 0")
     return errors
@@ -321,8 +350,22 @@ def _warn_for_launch_risky_values(result: ConfigSanityResult, settings: Settings
         result.warnings.append(
             "RUNPOD_COST_ROUNDING_MODE is unknown; cost tracking falls back to up_to_second"
         )
+    if (
+        settings.runpod_cost_tracking_enabled
+        and not settings.runpod_cloud_specific_pricing_configured
+    ):
+        result.warnings.append(
+            "RunPod cloud-specific GPU prices are not fully configured; "
+            "cost tracking uses fallback GPU pricing"
+        )
     if settings.admin_actions_enabled:
         result.warnings.append("ADMIN_ACTIONS_ENABLED=true; restrict operator access carefully")
+    if _contains_rtx_5090(settings.runpod_allowed_gpu_type_list):
+        result.warnings.append("RUNPOD_ALLOWED_GPU_TYPES includes RTX 5090; it is disabled for now")
+    if _contains_rtx_5090(settings.runpod_fallback_allowed_gpu_type_list):
+        result.warnings.append(
+            "RUNPOD_FALLBACK_ALLOWED_GPU_TYPES includes RTX 5090; it is disabled for now"
+        )
 
 
 def _warn_if_storage_incomplete(result: ConfigSanityResult, settings: Settings) -> None:
@@ -344,3 +387,7 @@ def _warn_if_placeholder(result: ConfigSanityResult, name: str, value: str) -> N
 
 def _is_placeholder(value: str) -> bool:
     return value.strip() in PLACEHOLDER_VALUES
+
+
+def _contains_rtx_5090(gpu_types: list[str]) -> bool:
+    return any("5090" in gpu_type for gpu_type in gpu_types)

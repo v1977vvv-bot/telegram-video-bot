@@ -514,17 +514,20 @@ RunPod settings:
 RUNPOD_API_KEY=change_me
 RUNPOD_TEMPLATE_ID=change_me
 RUNPOD_CLOUD_TYPE=COMMUNITY
-RUNPOD_ALLOWED_GPU_TYPES=NVIDIA GeForce RTX 5090,NVIDIA GeForce RTX 4090
+RUNPOD_PRIMARY_CLOUD_TYPE=SECURE
+RUNPOD_FALLBACK_CLOUD_TYPE=COMMUNITY
+RUNPOD_ALLOWED_GPU_TYPES=NVIDIA GeForce RTX 4090
+RUNPOD_FALLBACK_ALLOWED_GPU_TYPES=NVIDIA GeForce RTX 4090
 RUNPOD_MIN_VCPU=8
 RUNPOD_MIN_RAM_GB=48
 RUNPOD_FALLBACK_MIN_RAM_GB=48
-RUNPOD_CONTAINER_DISK_GB=50
-RUNPOD_VOLUME_DISK_GB=100
+RUNPOD_CONTAINER_DISK_GB=100
+RUNPOD_VOLUME_DISK_GB=0
 RUNPOD_CUDA_VERSION=12.8
 RUNPOD_COMFYUI_PORT=8188
 RUNPOD_POD_IDLE_SHUTDOWN_MINUTES=20
-RUNPOD_POD_READY_TIMEOUT_SECONDS=900
-RUNPOD_HEALTHCHECK_INTERVAL_SECONDS=10
+RUNPOD_POD_READY_TIMEOUT_SECONDS=7200
+RUNPOD_HEALTHCHECK_INTERVAL_SECONDS=15
 RUNPOD_AUTO_TERMINATE=true
 RUNPOD_KEEPER_ENABLED=true
 RUNPOD_KEEPER_INTERVAL_SECONDS=120
@@ -546,10 +549,19 @@ RUNPOD_ESTIMATED_COLD_START_SECONDS=720
 RUNPOD_SHORT_JOB_COLD_START_AVOIDANCE_ENABLED=true
 RUNPOD_SHORT_JOB_MAX_DURATION_SECONDS=90
 RUNPOD_CREATE_MAX_ATTEMPTS=3
+RUNPOD_PRIMARY_CREATE_MAX_ATTEMPTS=3
+RUNPOD_FALLBACK_CREATE_MAX_ATTEMPTS=6
 RUNPOD_CREATE_RETRY_SLEEP_SECONDS=20
 RUNPOD_COST_TRACKING_ENABLED=true
 RUNPOD_DEFAULT_HOURLY_COST_USD=0.80
-RUNPOD_GPU_HOURLY_COSTS_USD=NVIDIA GeForce RTX 5090:0.80,NVIDIA L40S:0.75,NVIDIA GeForce RTX 4090:0.55
+RUNPOD_GPU_HOURLY_COSTS_USD=NVIDIA L40S:0.75,NVIDIA GeForce RTX 4090:0.55
+RUNPOD_SECURE_GPU_PRICE_PER_HOUR_USD=
+RUNPOD_COMMUNITY_GPU_PRICE_PER_HOUR_USD=
+RUNPOD_SECURE_STARTUP_SURCHARGE_USD=0
+RUNPOD_COMMUNITY_COLD_START_SURCHARGE_USD=
+RUNPOD_SECURE_STORAGE_PRICE_PER_GB_MONTH_USD=
+RUNPOD_COMMUNITY_STORAGE_PRICE_PER_GB_MONTH_USD=0
+RUNPOD_BILLING_MARGIN_PERCENT=
 RUNPOD_COST_INCLUDE_COLD_START=true
 RUNPOD_COST_INCLUDE_IDLE_TIME=false
 RUNPOD_COST_MIN_BILLING_SECONDS=60
@@ -579,8 +591,21 @@ How it works:
   or `idle`.
 - If the pod passes ComfyUI `/system_stats`, it is marked `busy` and reused.
 - If no ready pod exists, the worker creates a pod from `RUNPOD_TEMPLATE_ID`.
-- GPU types are tried in `RUNPOD_ALLOWED_GPU_TYPES` order. If `NVIDIA GeForce RTX 5090`
-  is unavailable, the worker tries `NVIDIA GeForce RTX 4090`.
+- The create policy first exhausts Secure Cloud using `RUNPOD_PRIMARY_CLOUD_TYPE`,
+  `RUNPOD_ALLOWED_GPU_TYPES`, and `RUNPOD_PRIMARY_CREATE_MAX_ATTEMPTS`. If Secure
+  Cloud has no capacity, it falls back to `RUNPOD_FALLBACK_CLOUD_TYPE` with
+  `RUNPOD_FALLBACK_ALLOWED_GPU_TYPES` and `RUNPOD_FALLBACK_CREATE_MAX_ATTEMPTS`.
+- Current production GPU allowlists use `NVIDIA GeForce RTX 4090` only. RTX 5090 is
+  intentionally excluded because it currently crashes during ComfyUI startup.
+- Secure Cloud is preferred because the template can use a Network Volume with
+  pre-downloaded models. Community fallback uses the same template and may download
+  models into container disk through `download_models.sh`.
+- Cost tracking can use cloud-specific pricing. Set
+  `RUNPOD_SECURE_GPU_PRICE_PER_HOUR_USD` and
+  `RUNPOD_COMMUNITY_GPU_PRICE_PER_HOUR_USD` to estimate infrastructure cost from the
+  selected cloud type. Optional startup/storage fields are exposed in logs,
+  admin/debug, and `/api/v1/ops/status`; they do not change user-facing generation
+  prices or payment packages.
 - The RunPod create payload includes `cloudType`, `computeType=GPU`, `gpuTypeIds`,
   `gpuCount=1`, `templateId`, `allowedCudaVersions=[RUNPOD_CUDA_VERSION]`, disk
   sizes, minimum vCPU/RAM, public HTTP port `{RUNPOD_COMFYUI_PORT}/http`, and
@@ -594,14 +619,12 @@ How it works:
   unavailable and waiting is enabled, the job moves to `waiting_for_gpu`; otherwise it
   fails with a clear message and frozen balance is refunded.
 - On capacity errors, the manager retries pod creation up to
-  `RUNPOD_CREATE_MAX_ATTEMPTS`, sleeping `RUNPOD_CREATE_RETRY_SLEEP_SECONDS` between
-  full passes over `RUNPOD_ALLOWED_GPU_TYPES`.
+  the active cloud phase attempt limit, sleeping `RUNPOD_CREATE_RETRY_SLEEP_SECONDS`
+  between full passes over the configured GPU list.
 - RAM fallback is two-phase. The manager first exhausts all GPU types and all
-  `RUNPOD_CREATE_MAX_ATTEMPTS` with `RUNPOD_MIN_RAM_GB`. Only if those failures are
-  capacity errors and `RUNPOD_FALLBACK_MIN_RAM_GB < RUNPOD_MIN_RAM_GB`, it repeats the
-  full retry cycle with `RUNPOD_FALLBACK_MIN_RAM_GB`. A fallback such as `48` GB is an
-  emergency capacity fallback for MVP deployments where the workflow is known to run
-  with that RAM/GPU combination.
+  attempts for the active cloud phase with `RUNPOD_MIN_RAM_GB`. Only if those failures
+  are capacity errors and `RUNPOD_FALLBACK_MIN_RAM_GB < RUNPOD_MIN_RAM_GB`, it repeats
+  that cloud phase with `RUNPOD_FALLBACK_MIN_RAM_GB`.
 - Capacity exhaustion can put a job into `waiting_for_gpu` instead of failing. In this
   state the user's balance remains frozen, no capture/refund happens, and the worker
   schedules `retry_waiting_for_gpu_jobs` after `RUNPOD_WAITING_GPU_RETRY_SECONDS`.
@@ -647,10 +670,10 @@ How it works:
 Example fallback logs:
 
 ```text
-RunPod create phase started phase=primary min_ram_gb=80
-RunPod create phase exhausted phase=primary min_ram_gb=80
-RunPod create phase started phase=fallback min_ram_gb=48
-RunPod pod created gpu_type=NVIDIA GeForce RTX 5090 min_ram_gb=48 phase=fallback
+RunPod create cloud strategy started phase=primary cloud_type=SECURE max_attempts=3 gpu_types=['NVIDIA GeForce RTX 4090']
+RunPod create cloud strategy exhausted phase=primary cloud_type=SECURE
+RunPod primary cloud unavailable, falling back to cloud_type=COMMUNITY
+RunPod pod created cloud_type=COMMUNITY gpu_type=NVIDIA GeForce RTX 4090 min_ram_gb=48 cloud_phase=fallback resource_phase=primary
 ```
 
 Debug commands:
@@ -682,16 +705,22 @@ later finance/admin reporting.
 Formula:
 
 ```text
-cost_usd = hourly_gpu_price_usd * billable_seconds / 3600
+cost_usd = (hourly_gpu_price_usd * billable_seconds / 3600) + startup_surcharge_usd
 ```
 
 `billable_seconds` is rounded up to the next second and is at least
-`RUNPOD_COST_MIN_BILLING_SECONDS`. GPU hourly prices come from
-`RUNPOD_GPU_HOURLY_COSTS_USD`; unknown GPU types use
-`RUNPOD_DEFAULT_HOURLY_COST_USD`. With `RUNPOD_COST_INCLUDE_COLD_START=true`, the job
-cost interval starts before endpoint acquisition, so a job that creates a cold pod
-includes ComfyUI readiness time. `RUNPOD_COST_INCLUDE_IDLE_TIME=false` means warm/idle
-pod cost is not allocated per job in this MVP.
+`RUNPOD_COST_MIN_BILLING_SECONDS`. If configured, Secure jobs use
+`RUNPOD_SECURE_GPU_PRICE_PER_HOUR_USD` and Community jobs use
+`RUNPOD_COMMUNITY_GPU_PRICE_PER_HOUR_USD`. If those cloud-specific values are blank,
+cost tracking falls back to `RUNPOD_GPU_HOURLY_COSTS_USD`; unknown GPU types use
+`RUNPOD_DEFAULT_HOURLY_COST_USD` and a warning is logged. Community fallback can also
+include `RUNPOD_COMMUNITY_COLD_START_SURCHARGE_USD`; Secure can include
+`RUNPOD_SECURE_STARTUP_SURCHARGE_USD`.
+
+With `RUNPOD_COST_INCLUDE_COLD_START=true`, the job cost interval starts before endpoint
+acquisition, so a job that creates a cold pod includes ComfyUI readiness time.
+`RUNPOD_COST_INCLUDE_IDLE_TIME=false` means warm/idle pod cost is not allocated per job
+in this MVP.
 
 Examples:
 
@@ -708,10 +737,11 @@ curl http://localhost:8000/api/v1/debug/runpod/pods
 curl http://localhost:8000/api/v1/ops/status
 ```
 
-The debug jobs response includes `price_usd`, `cost_usd`, `gross_margin_usd`, and
-`gross_margin_percent` when cost is available. The RunPod pod debug response includes
-informational estimated runtime/cost for the pod record. These values are estimates;
-actual RunPod billing API reconciliation can be added later.
+The debug jobs response includes `price_usd`, `cost_usd`, `gross_margin_usd`,
+`gross_margin_percent`, `runpod_cloud_type`, and `runpod_gpu_type` when cost/pod data is
+available. The RunPod pod debug/admin response includes informational estimated
+runtime, hourly price, startup surcharge, and total estimated cost for the pod record.
+These values are estimates; actual RunPod billing API reconciliation can be added later.
 
 ## Stage 7.1 - RunPod bootstrap script
 
@@ -1352,13 +1382,14 @@ ComfyUI troubleshooting:
 - RunPod pod stays in `starting`: check the pod template startup logs. The template
   must start ComfyUI and expose port `RUNPOD_COMFYUI_PORT`.
 - RunPod readiness timeout: the worker marks the pod failed and terminates it when
-  `RUNPOD_AUTO_TERMINATE=true`. Increase `RUNPOD_POD_READY_TIMEOUT_SECONDS` only if
-  the template legitimately needs more boot time.
-- GPU unavailable: Stage 7 tries GPU types in `RUNPOD_ALLOWED_GPU_TYPES` order and
-  puts the job into `waiting_for_gpu` when `RUNPOD_WAITING_GPU_ENABLED=true`. If
+  `RUNPOD_AUTO_TERMINATE=true`. The default readiness timeout is long enough for
+  Community cold starts that download models into container disk.
+- GPU unavailable: the manager first tries Secure Cloud, then Community Cloud. Both
+  phases use RTX 4090 by default and exclude RTX 5090. If
   `RUNPOD_FALLBACK_MIN_RAM_GB` is lower than `RUNPOD_MIN_RAM_GB`, fallback RAM is tried
-  only after the primary RAM phase is fully exhausted by capacity errors. If waiting is
-  disabled, or the max wait is exceeded, the job fails with refund.
+  within each cloud phase only after the primary RAM phase is fully exhausted by
+  capacity errors. If waiting is disabled, or the max wait is exceeded, the job fails
+  with refund.
 - Waiting GPU jobs can be inspected with `GET /api/v1/debug/generation/jobs?limit=20`.
   Manual local retry is available through
   `POST /api/v1/debug/generation/retry-waiting-gpu`; it changes eligible
@@ -1373,10 +1404,9 @@ ComfyUI troubleshooting:
 - Terminal jobs (`completed`, `failed`, `cancelled`) clear `next_retry_at`,
   `waiting_for_gpu_since`, and `waiting_for_pod_since` so stale queue state does not
   appear in debug job lists.
-- Debug `POST /api/v1/debug/runpod/create-pod` also tries GPU types in
-  `RUNPOD_ALLOWED_GPU_TYPES` order, applies the same create retry and RAM fallback
-  policy, and returns `phase`, `min_ram_gb`, and `tried_gpu_types` for capacity
-  failures.
+- Debug `POST /api/v1/debug/runpod/create-pod` uses the same Secure-to-Community
+  fallback policy and returns `cloud_type`, `cloud_phase`, `phase`, `min_ram_gb`, and
+  `tried_gpu_types` for capacity failures.
 - Debug RunPod state with `GET /api/v1/debug/runpod/pods`; terminate a stuck pod with
   `DELETE /api/v1/debug/runpod/pods/{runpod_pod_id}`.
 - Run the keeper manually with `POST /api/v1/debug/runpod/keeper-tick`. It can create

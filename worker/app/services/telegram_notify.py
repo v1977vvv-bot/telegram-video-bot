@@ -76,6 +76,7 @@ class TelegramNotifyService:
             f"Видео: {safe_html(_display_name(notification), max_len=90)}\n\n"
             "Задача ожидает свободный сервер.\n"
             "Средства заморожены, но не списаны.\n\n"
+            "Если серверу нужно подготовить модели, первый запуск может занять дольше обычного.\n\n"
             "Если генерацию не удастся запустить, сумма вернётся на баланс."
         )
         return self._send_message(notification.telegram_id, text)
@@ -86,6 +87,7 @@ class TelegramNotifyService:
             f"Видео: {safe_html(_display_name(notification), max_len=90)}\n\n"
             "Задача ожидает свободный сервер.\n"
             "Средства заморожены, но не списаны.\n\n"
+            "Если серверу нужно подготовить модели, первый запуск может занять дольше обычного.\n\n"
             "Если генерацию не удастся запустить, сумма вернётся на баланс."
         )
         return self._send_message(notification.telegram_id, text)
