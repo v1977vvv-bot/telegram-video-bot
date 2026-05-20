@@ -43,6 +43,7 @@ RUN git clone https://github.com/ltdrdata/ComfyUI-Manager.git
 RUN git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
 RUN git clone https://github.com/kijai/ComfyUI-KJNodes.git
 RUN git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git
+RUN git clone https://github.com/kijai/ComfyUI-MelBandRoformer.git
 
 RUN find /workspace/ComfyUI/custom_nodes -name requirements.txt -print -exec pip install -r {} \; || true
 
