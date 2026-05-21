@@ -159,14 +159,13 @@ class RunPodClient:
         resolved_min_ram_gb = min_ram_gb or self._settings.runpod_min_ram_gb
         resolved_cloud_type = cloud_type or self._settings.runpod_primary_cloud_type
         use_fallback_overrides = (cloud_phase or "").strip().lower() == "fallback"
-        ports = (
-            _phase_string(
-                primary=self._settings.runpod_ports,
-                fallback=self._settings.runpod_fallback_ports,
-                use_fallback=use_fallback_overrides,
-            )
-            or f"{self._settings.runpod_comfyui_port}/http"
+        ports = _phase_csv_list(
+            primary=self._settings.runpod_ports,
+            fallback=self._settings.runpod_fallback_ports,
+            use_fallback=use_fallback_overrides,
         )
+        if not ports:
+            ports = [f"{self._settings.runpod_comfyui_port}/http"]
         allowed_cuda_versions = _phase_csv_list(
             primary=self._settings.runpod_allowed_cuda_versions
             or self._settings.runpod_cuda_version,
