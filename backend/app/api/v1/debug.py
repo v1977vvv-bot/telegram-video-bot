@@ -1213,6 +1213,7 @@ def _create_runpod_pod_with_fallback(settings) -> dict[str, Any]:
                                 gpu_type,
                                 min_ram_gb=min_ram_gb,
                                 cloud_type=cloud_type,
+                                cloud_phase=cloud_phase,
                             )
                         except RunPodCapacityError as exc:
                             error = _short_error(exc)

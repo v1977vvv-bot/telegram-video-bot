@@ -328,6 +328,7 @@ class RunPodManager:
                                 gpu_type,
                                 min_ram_gb=min_ram_gb,
                                 cloud_type=strategy.cloud_type,
+                                cloud_phase=strategy.phase,
                             )
                         except RunPodCapacityError as exc:
                             last_error = exc

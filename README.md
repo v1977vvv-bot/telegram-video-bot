@@ -512,19 +512,35 @@ RunPod settings:
 
 ```env
 RUNPOD_API_KEY=change_me
-RUNPOD_TEMPLATE_ID=change_me
+RUNPOD_TEMPLATE_ID=ouz4n831nc
 RUNPOD_CLOUD_TYPE=COMMUNITY
 RUNPOD_PRIMARY_CLOUD_TYPE=SECURE
 RUNPOD_FALLBACK_CLOUD_TYPE=COMMUNITY
 RUNPOD_ALLOWED_GPU_TYPES=NVIDIA GeForce RTX 4090
 RUNPOD_FALLBACK_ALLOWED_GPU_TYPES=NVIDIA GeForce RTX 4090
-RUNPOD_MIN_VCPU=8
-RUNPOD_MIN_RAM_GB=48
-RUNPOD_FALLBACK_MIN_RAM_GB=48
+RUNPOD_MIN_VCPU=32
+RUNPOD_MIN_RAM_GB=50
+RUNPOD_FALLBACK_MIN_RAM_GB=50
 RUNPOD_CONTAINER_DISK_GB=100
 RUNPOD_VOLUME_DISK_GB=0
 RUNPOD_CUDA_VERSION=12.8
+RUNPOD_ALLOWED_CUDA_VERSIONS=12.8
 RUNPOD_COMFYUI_PORT=8188
+RUNPOD_PORTS=8188/http
+RUNPOD_MIN_DOWNLOAD=1000
+RUNPOD_MIN_UPLOAD=1000
+RUNPOD_SUPPORT_PUBLIC_IP=false
+RUNPOD_START_JUPYTER=true
+RUNPOD_START_SSH=true
+RUNPOD_GLOBAL_NETWORK=false
+RUNPOD_FALLBACK_ALLOWED_CUDA_VERSIONS=
+RUNPOD_FALLBACK_PORTS=
+RUNPOD_FALLBACK_MIN_DOWNLOAD=
+RUNPOD_FALLBACK_MIN_UPLOAD=
+RUNPOD_FALLBACK_SUPPORT_PUBLIC_IP=
+RUNPOD_FALLBACK_START_JUPYTER=
+RUNPOD_FALLBACK_START_SSH=
+RUNPOD_FALLBACK_GLOBAL_NETWORK=
 RUNPOD_POD_IDLE_SHUTDOWN_MINUTES=20
 RUNPOD_POD_READY_TIMEOUT_SECONDS=7200
 RUNPOD_HEALTHCHECK_INTERVAL_SECONDS=15
@@ -606,10 +622,15 @@ How it works:
   selected cloud type. Optional startup/storage fields are exposed in logs,
   admin/debug, and `/api/v1/ops/status`; they do not change user-facing generation
   prices or payment packages.
-- The RunPod create payload includes `cloudType`, `computeType=GPU`, `gpuTypeIds`,
-  `gpuCount=1`, `templateId`, `allowedCudaVersions=[RUNPOD_CUDA_VERSION]`, disk
-  sizes, minimum vCPU/RAM, public HTTP port `{RUNPOD_COMFYUI_PORT}/http`, and
-  `supportPublicIp=true`.
+- The RunPod create payload follows the successful DeployOnDemand request shape:
+  `cloudType`, `containerDiskInGb`, `volumeInGb`, `gpuCount=1`, `gpuTypeId`,
+  `minMemoryInGb`, `minVcpuCount`, `templateId`, `allowedCudaVersions`,
+  `volumeKey=null`, `ports`, `countryCode=null`, `minDownload`, `minUpload`,
+  `supportPublicIp`, `startJupyter`, `startSsh`, and `globalNetwork`.
+- Primary and fallback phases can override ports, CUDA versions, bandwidth,
+  public IP, Jupyter, SSH, and global network settings through
+  `RUNPOD_FALLBACK_*` variables. Blank fallback values inherit the primary
+  RunPod payload settings.
 - The payload intentionally does not include `networkVolumeId`.
 - ComfyUI base URL is resolved as
   `https://{runpod_pod_id}-{RUNPOD_COMFYUI_PORT}.proxy.runpod.net`.

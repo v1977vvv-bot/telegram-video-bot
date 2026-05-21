@@ -185,4 +185,31 @@ def _runpod_config_ops_status(settings) -> dict[str, object]:
         "healthcheck_interval_seconds": settings.runpod_healthcheck_interval_seconds,
         "container_disk_gb": settings.runpod_container_disk_gb,
         "volume_disk_gb": settings.runpod_volume_disk_gb,
+        "min_vcpu_count": settings.runpod_min_vcpu,
+        "min_memory_gb": settings.runpod_min_ram_gb,
+        "fallback_min_memory_gb": settings.runpod_fallback_min_ram_gb,
+        "ports": settings.runpod_ports,
+        "fallback_ports": settings.runpod_fallback_ports or None,
+        "allowed_cuda_versions": [
+            item.strip()
+            for item in settings.runpod_allowed_cuda_versions.split(",")
+            if item.strip()
+        ],
+        "fallback_allowed_cuda_versions": [
+            item.strip()
+            for item in settings.runpod_fallback_allowed_cuda_versions.split(",")
+            if item.strip()
+        ],
+        "min_download": settings.runpod_min_download,
+        "min_upload": settings.runpod_min_upload,
+        "fallback_min_download": settings.runpod_fallback_min_download or None,
+        "fallback_min_upload": settings.runpod_fallback_min_upload or None,
+        "support_public_ip": settings.runpod_support_public_ip,
+        "fallback_support_public_ip": settings.runpod_fallback_support_public_ip or None,
+        "start_jupyter": settings.runpod_start_jupyter,
+        "fallback_start_jupyter": settings.runpod_fallback_start_jupyter or None,
+        "start_ssh": settings.runpod_start_ssh,
+        "fallback_start_ssh": settings.runpod_fallback_start_ssh or None,
+        "global_network": settings.runpod_global_network,
+        "fallback_global_network": settings.runpod_fallback_global_network or None,
     }
