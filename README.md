@@ -622,11 +622,14 @@ How it works:
   selected cloud type. Optional startup/storage fields are exposed in logs,
   admin/debug, and `/api/v1/ops/status`; they do not change user-facing generation
   prices or payment packages.
-- The RunPod create payload follows the successful DeployOnDemand request shape:
-  `cloudType`, `containerDiskInGb`, `volumeInGb`, `gpuCount=1`, `gpuTypeId`,
-  `minMemoryInGb`, `minVcpuCount`, `templateId`, `allowedCudaVersions`,
-  `volumeKey=null`, `ports`, `countryCode=null`, `minDownload`, `minUpload`,
-  `supportPublicIp`, `startJupyter`, `startSsh`, and `globalNetwork`.
+- The RunPod REST create payload keeps the values learned from the successful
+  DeployOnDemand request, but uses `/v1/pods` schema keys: `cloudType`,
+  `containerDiskInGb`, `volumeInGb`, `gpuCount=1`, `gpuTypeIds`,
+  `minRAMPerGPU`, `minVCPUPerGPU`, `templateId`, `allowedCudaVersions`,
+  `ports`, `supportPublicIp`, `startSsh`, and `globalNetwork`.
+- REST-only validation rejects HAR-only fields, so the worker does not send
+  `gpuTypeId`, `minMemoryInGb`, `minDownload`, `minUpload`, `countryCode`, or
+  `startJupyter`.
 - Primary and fallback phases can override ports, CUDA versions, bandwidth,
   public IP, Jupyter, SSH, and global network settings through
   `RUNPOD_FALLBACK_*` variables. Blank fallback values inherit the primary

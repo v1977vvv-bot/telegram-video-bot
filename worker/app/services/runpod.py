@@ -154,7 +154,7 @@ class RunPodClient:
         cloud_type: str | None = None,
         cloud_phase: str | None = None,
     ) -> dict[str, Any]:
-        """Build a RunPod DeployOnDemand-compatible /pods payload."""
+        """Build a RunPod REST /pods payload."""
 
         resolved_min_ram_gb = min_ram_gb or self._settings.runpod_min_ram_gb
         resolved_cloud_type = cloud_type or self._settings.runpod_primary_cloud_type
@@ -172,38 +172,20 @@ class RunPodClient:
             fallback=self._settings.runpod_fallback_allowed_cuda_versions,
             use_fallback=use_fallback_overrides,
         )
-        min_download = _phase_optional_int(
-            primary=self._settings.runpod_min_download,
-            fallback=self._settings.runpod_fallback_min_download,
-            use_fallback=use_fallback_overrides,
-        )
-        min_upload = _phase_optional_int(
-            primary=self._settings.runpod_min_upload,
-            fallback=self._settings.runpod_fallback_min_upload,
-            use_fallback=use_fallback_overrides,
-        )
         payload: dict[str, Any] = {
             "name": f"ultronlab-comfyui-{uuid4().hex[:8]}",
             "cloudType": resolved_cloud_type,
             "containerDiskInGb": self._settings.runpod_container_disk_gb,
             "volumeInGb": self._settings.runpod_volume_disk_gb,
             "gpuCount": 1,
-            "gpuTypeId": gpu_type,
-            "minMemoryInGb": resolved_min_ram_gb,
-            "minVcpuCount": self._settings.runpod_min_vcpu,
+            "gpuTypeIds": [gpu_type],
+            "minRAMPerGPU": resolved_min_ram_gb,
+            "minVCPUPerGPU": self._settings.runpod_min_vcpu,
             "templateId": self._settings.runpod_template_id,
-            "allowedCudaVersions": allowed_cuda_versions,
-            "volumeKey": None,
             "ports": ports,
-            "countryCode": None,
             "supportPublicIp": _phase_bool(
                 primary=self._settings.runpod_support_public_ip,
                 fallback=self._settings.runpod_fallback_support_public_ip,
-                use_fallback=use_fallback_overrides,
-            ),
-            "startJupyter": _phase_bool(
-                primary=self._settings.runpod_start_jupyter,
-                fallback=self._settings.runpod_fallback_start_jupyter,
                 use_fallback=use_fallback_overrides,
             ),
             "startSsh": _phase_bool(
@@ -217,10 +199,8 @@ class RunPodClient:
                 use_fallback=use_fallback_overrides,
             ),
         }
-        if min_download is not None:
-            payload["minDownload"] = min_download
-        if min_upload is not None:
-            payload["minUpload"] = min_upload
+        if allowed_cuda_versions:
+            payload["allowedCudaVersions"] = allowed_cuda_versions
         return payload
 
     def build_comfyui_base_url(self, pod_id: str, port: int | None = None) -> str:
@@ -317,21 +297,6 @@ def _phase_csv_list(*, primary: str, fallback: str, use_fallback: bool) -> list[
     return [item.strip() for item in raw_value.split(",") if item.strip()]
 
 
-def _phase_optional_int(
-    *,
-    primary: int | str | None,
-    fallback: int | str | None,
-    use_fallback: bool,
-) -> int | None:
-    raw_value = fallback if use_fallback and str(fallback or "").strip() else primary
-    if raw_value is None:
-        return None
-    raw = str(raw_value).strip()
-    if not raw:
-        return None
-    return int(raw)
-
-
 def _phase_bool(*, primary: bool, fallback: str, use_fallback: bool) -> bool:
     if not use_fallback or not fallback.strip():
         return primary
@@ -345,23 +310,20 @@ def _phase_bool(*, primary: bool, fallback: str, use_fallback: bool) -> bool:
 
 def _log_safe_create_payload(payload: dict[str, Any]) -> None:
     logger.info(
-        "RunPod create payload cloudType=%s templateId=%s gpuTypeId=%s "
-        "minMemoryInGb=%s minVcpuCount=%s containerDiskInGb=%s volumeInGb=%s "
-        "ports=%s allowedCudaVersions=%s minDownload=%s minUpload=%s "
-        "supportPublicIp=%s startJupyter=%s startSsh=%s globalNetwork=%s",
+        "RunPod create payload cloudType=%s templateId=%s gpuTypeIds=%s "
+        "minRAMPerGPU=%s minVCPUPerGPU=%s containerDiskInGb=%s volumeInGb=%s "
+        "ports=%s allowedCudaVersions=%s supportPublicIp=%s startSsh=%s "
+        "globalNetwork=%s",
         payload.get("cloudType"),
         payload.get("templateId"),
-        payload.get("gpuTypeId"),
-        payload.get("minMemoryInGb"),
-        payload.get("minVcpuCount"),
+        payload.get("gpuTypeIds"),
+        payload.get("minRAMPerGPU"),
+        payload.get("minVCPUPerGPU"),
         payload.get("containerDiskInGb"),
         payload.get("volumeInGb"),
         payload.get("ports"),
         payload.get("allowedCudaVersions"),
-        payload.get("minDownload"),
-        payload.get("minUpload"),
         payload.get("supportPublicIp"),
-        payload.get("startJupyter"),
         payload.get("startSsh"),
         payload.get("globalNetwork"),
     )
