@@ -188,16 +188,6 @@ class RunPodClient:
                 fallback=self._settings.runpod_fallback_support_public_ip,
                 use_fallback=use_fallback_overrides,
             ),
-            "startSsh": _phase_bool(
-                primary=self._settings.runpod_start_ssh,
-                fallback=self._settings.runpod_fallback_start_ssh,
-                use_fallback=use_fallback_overrides,
-            ),
-            "globalNetwork": _phase_bool(
-                primary=self._settings.runpod_global_network,
-                fallback=self._settings.runpod_fallback_global_network,
-                use_fallback=use_fallback_overrides,
-            ),
         }
         if allowed_cuda_versions:
             payload["allowedCudaVersions"] = allowed_cuda_versions
@@ -312,8 +302,7 @@ def _log_safe_create_payload(payload: dict[str, Any]) -> None:
     logger.info(
         "RunPod create payload cloudType=%s templateId=%s gpuTypeIds=%s "
         "minRAMPerGPU=%s minVCPUPerGPU=%s containerDiskInGb=%s volumeInGb=%s "
-        "ports=%s allowedCudaVersions=%s supportPublicIp=%s startSsh=%s "
-        "globalNetwork=%s",
+        "ports=%s allowedCudaVersions=%s supportPublicIp=%s",
         payload.get("cloudType"),
         payload.get("templateId"),
         payload.get("gpuTypeIds"),
@@ -324,8 +313,6 @@ def _log_safe_create_payload(payload: dict[str, Any]) -> None:
         payload.get("ports"),
         payload.get("allowedCudaVersions"),
         payload.get("supportPublicIp"),
-        payload.get("startSsh"),
-        payload.get("globalNetwork"),
     )
 
 

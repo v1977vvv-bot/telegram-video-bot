@@ -626,10 +626,12 @@ How it works:
   DeployOnDemand request, but uses `/v1/pods` schema keys: `cloudType`,
   `containerDiskInGb`, `volumeInGb`, `gpuCount=1`, `gpuTypeIds`,
   `minRAMPerGPU`, `minVCPUPerGPU`, `templateId`, `allowedCudaVersions`,
-  `ports`, `supportPublicIp`, `startSsh`, and `globalNetwork`.
+  `ports`, and `supportPublicIp`.
 - REST-only validation rejects HAR-only fields, so the worker does not send
   `gpuTypeId`, `minMemoryInGb`, `minDownload`, `minUpload`, `countryCode`, or
-  `startJupyter`.
+  `startJupyter`. `startSsh` and `globalNetwork` are also kept as env values for
+  compatibility but omitted from REST creates unless the API schema explicitly
+  requires them later.
 - Primary and fallback phases can override ports, CUDA versions, bandwidth,
   public IP, Jupyter, SSH, and global network settings through
   `RUNPOD_FALLBACK_*` variables. Blank fallback values inherit the primary
