@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class VideoProbeService:
@@ -88,30 +91,61 @@ class VideoProbeService:
 
     def extract_last_frame(self, video_path: Path, output_image_path: Path) -> Path:
         output_image_path.parent.mkdir(parents=True, exist_ok=True)
-        result = self._run_ffmpeg(
-            [
-                "ffmpeg",
-                "-y",
-                "-sseof",
-                "-0.1",
-                "-i",
-                str(video_path),
-                "-frames:v",
-                "1",
-                str(output_image_path),
-            ]
-        )
-        if result.returncode == 0 and _has_output(output_image_path):
-            return output_image_path
-
         duration = self.get_video_duration_seconds(video_path)
-        seek_seconds = max(duration - Decimal("0.100"), Decimal("0"))
+        attempt_errors: list[str] = []
+
+        timestamps = _last_frame_candidate_timestamps(duration)
+        for timestamp in timestamps:
+            if output_image_path.exists():
+                output_image_path.unlink()
+            timestamp_arg = _format_decimal_seconds(timestamp)
+            result = self._run_ffmpeg(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    timestamp_arg,
+                    "-i",
+                    str(video_path),
+                    "-frames:v",
+                    "1",
+                    str(output_image_path),
+                ]
+            )
+            if _has_output(output_image_path):
+                logger.info(
+                    "Last frame extracted input=%s output=%s duration=%s timestamp=%s",
+                    video_path,
+                    output_image_path,
+                    _format_decimal_seconds(duration),
+                    timestamp_arg,
+                )
+                return output_image_path
+
+            stderr_tail = _stderr_tail(result.stderr)
+            attempt_errors.append(
+                f"timestamp={timestamp_arg} returncode={result.returncode} "
+                f"stderr_tail={stderr_tail}"
+            )
+            logger.warning(
+                "Last frame extraction attempt failed input=%s output=%s duration=%s "
+                "timestamp=%s returncode=%s stderr_tail=%s",
+                video_path,
+                output_image_path,
+                _format_decimal_seconds(duration),
+                timestamp_arg,
+                result.returncode,
+                stderr_tail,
+            )
+
+        if output_image_path.exists():
+            output_image_path.unlink()
         fallback_result = self._run_ffmpeg(
             [
                 "ffmpeg",
                 "-y",
-                "-ss",
-                format(seek_seconds, "f"),
+                "-sseof",
+                "-0.5",
                 "-i",
                 str(video_path),
                 "-frames:v",
@@ -119,11 +153,32 @@ class VideoProbeService:
                 str(output_image_path),
             ]
         )
-        if fallback_result.returncode != 0 or not _has_output(output_image_path):
-            raise RuntimeError(
-                f"ffmpeg last frame extraction failed: {fallback_result.stderr.strip()}"
+        if _has_output(output_image_path):
+            logger.info(
+                "Last frame extracted input=%s output=%s duration=%s timestamp=%s",
+                video_path,
+                output_image_path,
+                _format_decimal_seconds(duration),
+                "sseof:-0.5",
             )
-        return output_image_path
+            return output_image_path
+
+        stderr_tail = _stderr_tail(fallback_result.stderr)
+        attempt_errors.append(
+            f"timestamp=sseof:-0.5 returncode={fallback_result.returncode} "
+            f"stderr_tail={stderr_tail}"
+        )
+        logger.warning(
+            "Last frame extraction attempt failed input=%s output=%s duration=%s "
+            "timestamp=%s returncode=%s stderr_tail=%s",
+            video_path,
+            output_image_path,
+            _format_decimal_seconds(duration),
+            "sseof:-0.5",
+            fallback_result.returncode,
+            stderr_tail,
+        )
+        raise RuntimeError("ffmpeg last frame extraction failed: " + " | ".join(attempt_errors))
 
     def _run_ffmpeg(self, command: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -136,3 +191,34 @@ class VideoProbeService:
 
 def _has_output(path: Path) -> bool:
     return path.exists() and path.stat().st_size > 0
+
+
+def _last_frame_candidate_timestamps(duration: Decimal) -> list[Decimal]:
+    candidates = [
+        duration - Decimal("0.20"),
+        duration - Decimal("0.50"),
+        duration - Decimal("1.00"),
+        duration * Decimal("0.95"),
+        duration * Decimal("0.90"),
+    ]
+    timestamps: list[Decimal] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        timestamp = max(candidate, Decimal("0.1"))
+        key = _format_decimal_seconds(timestamp)
+        if key in seen:
+            continue
+        seen.add(key)
+        timestamps.append(timestamp)
+    return timestamps
+
+
+def _format_decimal_seconds(value: Decimal) -> str:
+    return format(value.quantize(Decimal("0.001")), "f")
+
+
+def _stderr_tail(stderr: str, limit: int = 600) -> str:
+    text = " ".join(stderr.strip().split())
+    if len(text) <= limit:
+        return text
+    return text[-limit:]

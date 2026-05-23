@@ -341,14 +341,30 @@ def _run_comfyui_generation(job_id: UUID, settings: Settings) -> dict[str, str]:
                 and segment_image_strategy == SegmentImageStrategy.LAST_FRAME
             ):
                 next_frame_path = frames_dir / f"last_frame_{segment.segment_index:03d}.png"
-                VideoProbeService().extract_last_frame(segment_path, next_frame_path)
+                try:
+                    extracted_frame_path = VideoProbeService().extract_last_frame(
+                        segment_path,
+                        next_frame_path,
+                    )
+                except RuntimeError as exc:
+                    logger.warning(
+                        "Last frame extraction failed, falling back to previous image "
+                        "job_id=%s segment_index=%s input=%s fallback_image=%s error=%s",
+                        job_id,
+                        segment.segment_index,
+                        segment_path,
+                        current_image_path,
+                        exc,
+                    )
+                    continue
+
                 logger.info(
                     "Last frame extracted job_id=%s segment_index=%s path=%s",
                     job_id,
                     segment.segment_index,
-                    next_frame_path,
+                    extracted_frame_path,
                 )
-                current_image_path = next_frame_path
+                current_image_path = extracted_frame_path
 
         final_path = _build_final_video(
             job_id=job_id,
