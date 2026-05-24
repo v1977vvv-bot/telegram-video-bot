@@ -687,19 +687,26 @@ The FP8 image uses the existing `docker/runpod-comfyui/Dockerfile.rtxpro-cu130`
 with build args:
 
 ```env
+DOWNLOAD_GGUF_Q8=0
 DOWNLOAD_WAN_FP8_480P=1
 DOWNLOAD_WAN_FP8_720P=0
 DOWNLOAD_INFINITETALK_FP8=1
 ```
 
-`download_models.sh` still downloads the GGUF Q8 baseline models by default. FP8 files
-are optional and are downloaded only when their flags are enabled:
+`download_models.sh` downloads the GGUF Q8 baseline models by default for production
+and non-FP8 images. The FP8 profile disables those two GGUF Q8 diffusion downloads with
+`DOWNLOAD_GGUF_Q8=0`. FP8 files are optional and are downloaded only when their flags
+are enabled:
 
 ```env
+DOWNLOAD_GGUF_Q8=0
 DOWNLOAD_WAN_FP8_480P=1
 DOWNLOAD_WAN_FP8_720P=0
 DOWNLOAD_INFINITETALK_FP8=1
 ```
+
+Set `DOWNLOAD_GGUF_Q8=1` only when you want the FP8 image to also include the GGUF Q8
+baseline files for side-by-side testing.
 
 FP8 files:
 

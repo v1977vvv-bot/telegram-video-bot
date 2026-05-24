@@ -33,6 +33,7 @@ ghcr.io/v1977vvv-bot/synzai-comfyui:rtx-pro-cu130-fp8
 This tag is built from `Dockerfile.rtxpro-cu130` with FP8 runtime download defaults:
 
 ```env
+DOWNLOAD_GGUF_Q8=0
 DOWNLOAD_WAN_FP8_480P=1
 DOWNLOAD_WAN_FP8_720P=0
 DOWNLOAD_INFINITETALK_FP8=1
@@ -44,10 +45,15 @@ The production `latest` tag is not changed. The existing
 FP8 model flags consumed by `/download_models.sh`:
 
 ```env
+DOWNLOAD_GGUF_Q8=0
 DOWNLOAD_WAN_FP8_480P=1
 DOWNLOAD_WAN_FP8_720P=0
 DOWNLOAD_INFINITETALK_FP8=1
 ```
+
+`DOWNLOAD_GGUF_Q8` defaults to `1` for production/latest and the non-FP8 CUDA 13
+image. The `rtx-pro-cu130-fp8` workflow sets it to `0`, so the FP8 profile does not
+download the two baseline GGUF Q8 diffusion models unless explicitly enabled.
 
 FP8 diffusion files are stored directly in:
 

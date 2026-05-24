@@ -39,6 +39,7 @@ jobs:
           tags: ghcr.io/v1977vvv-bot/synzai-comfyui:rtx-pro-cu130-fp8
           platforms: linux/amd64
           build-args: |
+            DOWNLOAD_GGUF_Q8=0
             DOWNLOAD_WAN_FP8_480P=1
             DOWNLOAD_WAN_FP8_720P=0
             DOWNLOAD_INFINITETALK_FP8=1

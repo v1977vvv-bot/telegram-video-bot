@@ -11,6 +11,7 @@ fi
 
 echo "[models] COMFYUI_DIR=${COMFYUI_DIR}"
 echo "[models] MODELS_DIR=${MODELS_DIR}"
+echo "[models] DOWNLOAD_GGUF_Q8=${DOWNLOAD_GGUF_Q8:-1}"
 echo "[models] DOWNLOAD_WAN_FP8_480P=${DOWNLOAD_WAN_FP8_480P:-0}"
 echo "[models] DOWNLOAD_WAN_FP8_720P=${DOWNLOAD_WAN_FP8_720P:-0}"
 echo "[models] DOWNLOAD_INFINITETALK_FP8=${DOWNLOAD_INFINITETALK_FP8:-0}"
@@ -75,15 +76,19 @@ bool_is_true() {
   esac
 }
 
-download \
-  "https://huggingface.co/city96/Wan2.1-I2V-14B-480P-gguf/resolve/main/wan2.1-i2v-14b-480p-Q8_0.gguf" \
-  "${MODELS_DIR}/diffusion_models/WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf" \
-  16000
+if bool_is_true "${DOWNLOAD_GGUF_Q8:-1}"; then
+  download \
+    "https://huggingface.co/city96/Wan2.1-I2V-14B-480P-gguf/resolve/main/wan2.1-i2v-14b-480p-Q8_0.gguf" \
+    "${MODELS_DIR}/diffusion_models/WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf" \
+    16000
 
-download \
-  "https://huggingface.co/Kijai/WanVideo_comfy_GGUF/resolve/main/InfiniteTalk/Wan2_1-InfiniteTalk_Single_Q8.gguf" \
-  "${MODELS_DIR}/diffusion_models/WanVideo/InfiniteTalk/Wan2_1-InfiniteTalk_Single_Q8.gguf" \
-  2000
+  download \
+    "https://huggingface.co/Kijai/WanVideo_comfy_GGUF/resolve/main/InfiniteTalk/Wan2_1-InfiniteTalk_Single_Q8.gguf" \
+    "${MODELS_DIR}/diffusion_models/WanVideo/InfiniteTalk/Wan2_1-InfiniteTalk_Single_Q8.gguf" \
+    2000
+else
+  echo "[models] DOWNLOAD_GGUF_Q8 is disabled"
+fi
 
 download \
   "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan2_1_VAE_bf16.safetensors" \
