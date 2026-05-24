@@ -16,3 +16,7 @@ postgres_data/
 redis_data/
 storage/
 backups/
+*.har
+
+# Local WaveSpeed analysis outputs
+wavespeed_*.csv
