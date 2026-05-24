@@ -11,6 +11,9 @@ fi
 
 echo "[models] COMFYUI_DIR=${COMFYUI_DIR}"
 echo "[models] MODELS_DIR=${MODELS_DIR}"
+echo "[models] DOWNLOAD_WAN_FP8_480P=${DOWNLOAD_WAN_FP8_480P:-0}"
+echo "[models] DOWNLOAD_WAN_FP8_720P=${DOWNLOAD_WAN_FP8_720P:-0}"
+echo "[models] DOWNLOAD_INFINITETALK_FP8=${DOWNLOAD_INFINITETALK_FP8:-0}"
 
 mkdir -p "${MODELS_DIR}"
 
@@ -65,6 +68,13 @@ download() {
   echo "[models] downloaded: $target (${final_size_mb} MB)"
 }
 
+bool_is_true() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 download \
   "https://huggingface.co/city96/Wan2.1-I2V-14B-480P-gguf/resolve/main/wan2.1-i2v-14b-480p-Q8_0.gguf" \
   "${MODELS_DIR}/diffusion_models/WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf" \
@@ -99,5 +109,32 @@ download \
   "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors" \
   "${MODELS_DIR}/loras/WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors" \
   600
+
+if bool_is_true "${DOWNLOAD_WAN_FP8_480P:-0}"; then
+  download \
+    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors" \
+    "${MODELS_DIR}/diffusion_models/wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors" \
+    10000
+else
+  echo "[models] DOWNLOAD_WAN_FP8_480P is disabled"
+fi
+
+if bool_is_true "${DOWNLOAD_WAN_FP8_720P:-0}"; then
+  download \
+    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_i2v_720p_14B_fp8_e4m3fn.safetensors" \
+    "${MODELS_DIR}/diffusion_models/wan2.1_i2v_720p_14B_fp8_e4m3fn.safetensors" \
+    10000
+else
+  echo "[models] DOWNLOAD_WAN_FP8_720P is disabled"
+fi
+
+if bool_is_true "${DOWNLOAD_INFINITETALK_FP8:-0}"; then
+  download \
+    "https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/InfiniteTalk/Wan2_1-InfiniteTalk-Multi_fp8_e4m3fn_scaled_KJ.safetensors" \
+    "${MODELS_DIR}/diffusion_models/Wan2_1-InfiniteTalk-Multi_fp8_e4m3fn_scaled_KJ.safetensors" \
+    1000
+else
+  echo "[models] DOWNLOAD_INFINITETALK_FP8 is disabled"
+fi
 
 echo "[models] all required models are present"

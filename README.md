@@ -641,6 +641,87 @@ How it works:
   `https://{runpod_pod_id}-{RUNPOD_COMFYUI_PORT}.proxy.runpod.net`.
 - If ComfyUI does not become healthy before `RUNPOD_POD_READY_TIMEOUT_SECONDS`, the pod
   is marked failed and terminated when `RUNPOD_AUTO_TERMINATE=true`.
+
+### RTX 5090 experimental test mode
+
+RTX 4090 remains the production default. To test RTX 5090 without changing production
+defaults, use a separate RunPod template or temporary pod config and set:
+
+```env
+RUNPOD_EXPERIMENTAL_LOW_VRAM_STARTUP=true
+```
+
+The flag is consumed by `docker/runpod-comfyui/start.sh` inside the RunPod image. When
+enabled, the image starts ComfyUI with `--lowvram`. When disabled, the default startup
+command remains `python main.py --listen 0.0.0.0 --port 8188`.
+
+The startup script logs GPU inventory, VRAM, NVIDIA driver/CUDA information, torch
+version, torch CUDA version, and the exact ComfyUI startup command before launching
+ComfyUI. The script only downloads models before startup; it does not intentionally
+preload models into VRAM.
+
+Keep `RUNPOD_ALLOWED_GPU_TYPES=NVIDIA GeForce RTX 4090` in production until RTX 5090
+startup has been verified end to end.
+
+### RTX PRO CUDA 13 FP8 WanVideo / InfiniteTalk image
+
+Production `latest` remains unchanged. The existing CUDA 13 experimental image remains:
+
+```text
+ghcr.io/v1977vvv-bot/synzai-comfyui:rtx-pro-cu130
+```
+
+The FP8 test profile builds and pushes:
+
+```text
+ghcr.io/v1977vvv-bot/synzai-comfyui:rtx-pro-cu130-fp8
+```
+
+Workflow:
+
+```text
+.github/workflows/build-runpod-comfyui-rtxpro-cu130-fp8.yml
+```
+
+The FP8 image uses the existing `docker/runpod-comfyui/Dockerfile.rtxpro-cu130`
+with build args:
+
+```env
+DOWNLOAD_WAN_FP8_480P=1
+DOWNLOAD_WAN_FP8_720P=0
+DOWNLOAD_INFINITETALK_FP8=1
+```
+
+`download_models.sh` still downloads the GGUF Q8 baseline models by default. FP8 files
+are optional and are downloaded only when their flags are enabled:
+
+```env
+DOWNLOAD_WAN_FP8_480P=1
+DOWNLOAD_WAN_FP8_720P=0
+DOWNLOAD_INFINITETALK_FP8=1
+```
+
+FP8 files:
+
+- `wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors`
+- `wan2.1_i2v_720p_14B_fp8_e4m3fn.safetensors`
+- `Wan2_1-InfiniteTalk-Multi_fp8_e4m3fn_scaled_KJ.safetensors`
+
+All FP8 diffusion files are placed directly under:
+
+```text
+ComfyUI/models/diffusion_models/
+```
+
+Recommended test order:
+
+1. Test 480p FP8 first with `DOWNLOAD_WAN_FP8_480P=1` and
+   `DOWNLOAD_INFINITETALK_FP8=1`.
+2. Test 720p FP8 second by also enabling `DOWNLOAD_WAN_FP8_720P=1`.
+3. Compare both against the GGUF Q8 baseline: 531.16 seconds for a 60 second video.
+
+The RunPod image startup log lists available WanVideo and InfiniteTalk model files in
+`models/diffusion_models`, so FP8 model presence is visible before ComfyUI starts.
 - Stage 8.1 still uses one active pod and one local worker process. If GPU capacity is
   unavailable and waiting is enabled, the job moves to `waiting_for_gpu`; otherwise it
   fails with a clear message and frozen balance is refunded.

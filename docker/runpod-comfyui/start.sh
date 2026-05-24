@@ -53,6 +53,34 @@ PY
   log "========================================="
 }
 
+log_diffusion_model_inventory() {
+  local diffusion_dir="/workspace/ComfyUI/models/diffusion_models"
+  log "===== WanVideo / InfiniteTalk diffusion model inventory ====="
+  if [ ! -d "${diffusion_dir}" ]; then
+    log "diffusion_models directory not found: ${diffusion_dir}"
+    log "============================================================="
+    return 0
+  fi
+
+  local found=0
+  while IFS= read -r model_file; do
+    found=1
+    local size
+    size="$(du -h "${model_file}" | awk '{print $1}')"
+    log "${size} ${model_file}"
+  done < <(
+    find "${diffusion_dir}" -type f \( \
+      -iname '*wan*' -o \
+      -iname '*infinitetalk*' \
+    \) | sort
+  )
+
+  if [ "${found}" = "0" ]; then
+    log "No WanVideo/InfiniteTalk diffusion model files found in ${diffusion_dir}"
+  fi
+  log "============================================================="
+}
+
 cd /workspace/ComfyUI
 
 log_gpu_info
@@ -63,6 +91,8 @@ if [ "${DOWNLOAD_MODELS:-1}" = "1" ]; then
 else
   echo "[models] DOWNLOAD_MODELS=0, skipping model download"
 fi
+
+log_diffusion_model_inventory
 
 comfyui_args=(main.py --listen 0.0.0.0 --port 8188)
 

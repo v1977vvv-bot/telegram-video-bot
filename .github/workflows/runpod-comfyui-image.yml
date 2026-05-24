@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "docker/runpod-comfyui/**"
-      - ".github/workflows/runpod-comfyui-image.yml"
+      # Keep production latest protected from experimental script/profile changes.
+      # Use workflow_dispatch for intentional latest rebuilds after script changes.
+      - "docker/runpod-comfyui/Dockerfile"
 
 permissions:
   contents: read
