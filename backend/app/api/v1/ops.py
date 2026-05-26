@@ -61,11 +61,15 @@ async def get_ops_status(session: SessionDep, response: Response) -> OpsStatusRe
         runpod_pods=runpod_pods,
         runpod_config=_runpod_config_ops_status(settings),
         runpod_costs=_runpod_cost_ops_status(settings),
+        comfyui=_comfyui_ops_status(settings),
         payments=_payment_ops_status(settings),
         business=business,
         admin={
             "admin_panel_enabled": settings.admin_panel_enabled,
             "admin_actions_enabled": settings.admin_actions_enabled,
+            "admin_internal_api_token_configured": settings.admin_internal_api_token_configured,
+            "admin_bot_token_configured": settings.admin_bot_token_is_configured,
+            "admin_alerts_enabled": settings.admin_alerts_enabled,
         },
     )
 
@@ -135,6 +139,19 @@ def _payment_ops_status(settings) -> dict[str, object]:
         "provider_currency": settings.payment_provider_currency,
         "cryptomus_enabled": settings.cryptomus_enabled,
         "cryptobot_enabled": settings.cryptobot_pay_enabled,
+    }
+
+
+def _comfyui_ops_status(settings) -> dict[str, object]:
+    try:
+        model_profile = settings.comfyui_model_profile_normalized
+    except ValueError:
+        model_profile = settings.comfyui_model_profile
+    return {
+        "model_profile": model_profile,
+        "allowed_model_profiles": list(settings.comfyui_allowed_model_profiles),
+        "workflow_path": settings.comfyui_workflow_path,
+        "timeout_seconds": settings.comfyui_timeout_seconds,
     }
 
 
@@ -212,4 +229,9 @@ def _runpod_config_ops_status(settings) -> dict[str, object]:
         "fallback_start_ssh": settings.runpod_fallback_start_ssh or None,
         "global_network": settings.runpod_global_network,
         "fallback_global_network": settings.runpod_fallback_global_network or None,
+        "experimental_low_vram_startup": settings.runpod_experimental_low_vram_startup,
+        "discovery_enabled": settings.runpod_discovery_enabled,
+        "discovery_interval_seconds": settings.runpod_discovery_interval_seconds,
+        "discovery_auto_register": settings.runpod_discovery_auto_register,
+        "discovery_require_healthy": settings.runpod_discovery_require_healthy,
     }

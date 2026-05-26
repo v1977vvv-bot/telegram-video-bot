@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     admin_actions_enabled: bool = False
     admin_max_manual_topup_usd: Decimal = Field(default=Decimal("500"))
     admin_require_action_reason: bool = True
+    admin_bot_token: str = ""
+    admin_telegram_ids: str = ""
+    admin_internal_api_token: str = ""
+    admin_alerts_enabled: bool = True
+    admin_alert_chat_id: str = ""
+    admin_pod_alert_cooldown_minutes: int = 15
+    admin_queue_alert_cooldown_minutes: int = 20
+    admin_queue_alert_min_waiting_jobs: int = 2
+    admin_queue_alert_target_wait_minutes: int = 10
+    admin_queue_alert_repeat_enabled: bool = True
 
     postgres_host: str = "postgres"
     postgres_port: int = 5432
@@ -117,6 +127,7 @@ class Settings(BaseSettings):
     runpod_start_jupyter: bool = True
     runpod_start_ssh: bool = True
     runpod_global_network: bool = False
+    runpod_experimental_low_vram_startup: bool = False
     runpod_fallback_min_download: str = ""
     runpod_fallback_min_upload: str = ""
     runpod_fallback_support_public_ip: str = ""
@@ -169,6 +180,10 @@ class Settings(BaseSettings):
     runpod_queue_wait_enabled: bool = True
     runpod_queue_retry_seconds: int = 60
     runpod_queue_max_wait_minutes: int = 60
+    runpod_discovery_enabled: bool = True
+    runpod_discovery_interval_seconds: int = 60
+    runpod_discovery_auto_register: bool = True
+    runpod_discovery_require_healthy: bool = True
 
     distributed_segment_generation_enabled: bool = False
     distributed_min_audio_duration_seconds: int = 60
@@ -185,6 +200,7 @@ class Settings(BaseSettings):
     comfyui_port: int = 8188
     comfyui_base_url: str = "http://localhost:8188"
     comfyui_workflow_path: str = "/app/workflows/infinite_talk_api.json"
+    comfyui_model_profile: str = "fp8_480p"
     comfyui_timeout_seconds: int = 7200
     comfyui_poll_interval_seconds: int = 5
     comfyui_transient_retry_max_attempts: int = 5
@@ -254,6 +270,22 @@ class Settings(BaseSettings):
         return bool(token and token != "change_me" and ":" in token)
 
     @property
+    def admin_bot_token_is_configured(self) -> bool:
+        token = self.admin_bot_token.strip()
+        return bool(token and token != "change_me" and ":" in token)
+
+    @property
+    def admin_alert_bot_token(self) -> str:
+        admin_token = self.admin_bot_token.strip()
+        if self.admin_bot_token_is_configured:
+            return admin_token
+        return self.telegram_bot_token.strip()
+
+    @property
+    def admin_alert_bot_token_is_configured(self) -> bool:
+        return self.admin_bot_token_is_configured or self.telegram_token_is_configured
+
+    @property
     def debug_admin_ids(self) -> set[int]:
         values: set[int] = set()
         for item in self.debug_admin_telegram_ids.split(","):
@@ -261,6 +293,20 @@ class Settings(BaseSettings):
             if item:
                 values.add(int(item))
         return values
+
+    @property
+    def admin_telegram_id_set(self) -> set[int]:
+        values: set[int] = set()
+        for item in self.admin_telegram_ids.split(","):
+            item = item.strip()
+            if item:
+                values.add(int(item))
+        return values
+
+    @property
+    def admin_internal_api_token_configured(self) -> bool:
+        token = self.admin_internal_api_token.strip()
+        return bool(token and token != "change_me")
 
     @property
     def runpod_allowed_gpu_type_list(self) -> list[str]:
@@ -387,6 +433,18 @@ class Settings(BaseSettings):
     def cryptobot_pay_configured(self) -> bool:
         token = self.cryptobot_pay_api_token.strip()
         return bool(token and token != "change_me")
+
+    @property
+    def comfyui_allowed_model_profiles(self) -> tuple[str, ...]:
+        return ("gguf_q8_480p", "fp8_480p", "fp8_720p")
+
+    @property
+    def comfyui_model_profile_normalized(self) -> str:
+        profile = self.comfyui_model_profile.strip().lower()
+        if profile not in self.comfyui_allowed_model_profiles:
+            allowed = ", ".join(self.comfyui_allowed_model_profiles)
+            raise ValueError(f"COMFYUI_MODEL_PROFILE must be one of: {allowed}")
+        return profile
 
 
 @lru_cache(maxsize=1)

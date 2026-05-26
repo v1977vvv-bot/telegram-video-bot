@@ -4,7 +4,7 @@ from worker.app.tasks.generation import (
     retry_waiting_for_gpu_jobs,
     retry_waiting_generation_jobs,
 )
-from worker.app.tasks.runpod_keeper import runpod_keeper_tick
+from worker.app.tasks.runpod_keeper import runpod_keeper_tick, sync_runpod_pods
 
 __all__ = [
     "debug_ping",
@@ -12,4 +12,5 @@ __all__ = [
     "retry_waiting_for_gpu_jobs",
     "retry_waiting_generation_jobs",
     "runpod_keeper_tick",
+    "sync_runpod_pods",
 ]

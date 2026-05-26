@@ -29,6 +29,7 @@ from shared.app.enums import (
 from shared.app.job_names import build_job_display_name
 from worker.app.celery_app import celery_app
 from worker.app.database import get_worker_session
+from worker.app.services.admin_alerts import TelegramAdminAlertService
 from worker.app.services.audio import AudioSegmentFile, AudioSegmentPlan, AudioService
 from worker.app.services.balance import SyncBalanceService
 from worker.app.services.business_balance import SyncBusinessBalanceService
@@ -501,17 +502,18 @@ def _acquire_single_comfyui_endpoint_or_wait(
         with get_worker_session() as session:
             return runpod_manager.ensure_comfyui_endpoint(session, job_id=job_id)
     except NoGpuAvailableError as exc:
-        if not settings.runpod_waiting_gpu_enabled:
+        if not settings.runpod_queue_wait_enabled:
             raise
-        wait_result = _handle_no_gpu_available(job_id, settings, _safe_error_message(exc))
-        if wait_result.status == JobStatus.WAITING_FOR_GPU.value:
-            _notify_generation_waiting_for_gpu(wait_result.notification)
-            _schedule_waiting_retry(settings.runpod_waiting_gpu_retry_seconds)
-            return {"status": JobStatus.WAITING_FOR_GPU.value, "job_id": str(job_id)}
+        wait_result = _handle_runpod_pool_full(job_id, settings, _safe_error_message(exc))
+        if wait_result.status == JobStatus.WAITING_FOR_POD.value:
+            _notify_generation_waiting_for_pod(wait_result.notification)
+            _send_admin_pod_needed_alert(job_id, "RunPod capacity unavailable")
+            _schedule_waiting_retry(settings.runpod_queue_retry_seconds)
+            return {"status": JobStatus.WAITING_FOR_POD.value, "job_id": str(job_id)}
 
         notification = _mark_job_failed(
             job_id,
-            "GPU unavailable for too long. Funds returned.",
+            "Queue wait exceeded. Funds returned.",
         )
         _notify_generation_failed(notification)
         return {"status": JobStatus.FAILED.value, "job_id": str(job_id)}
@@ -521,6 +523,7 @@ def _acquire_single_comfyui_endpoint_or_wait(
         wait_result = _handle_runpod_pool_full(job_id, settings, _safe_error_message(exc))
         if wait_result.status == JobStatus.WAITING_FOR_POD.value:
             _notify_generation_waiting_for_pod(wait_result.notification)
+            _send_admin_pod_needed_alert(job_id, _safe_error_message(exc))
             _schedule_waiting_retry(settings.runpod_queue_retry_seconds)
             return {"status": JobStatus.WAITING_FOR_POD.value, "job_id": str(job_id)}
 
@@ -717,6 +720,19 @@ def _schedule_waiting_retry(retry_seconds: int) -> None:
         retry_waiting_generation_jobs.apply_async(countdown=countdown)
     except Exception:
         logger.warning("Waiting generation retry scheduling failed")
+
+
+def _send_admin_pod_needed_alert(job_id: UUID, reason: str) -> None:
+    try:
+        with get_worker_session() as session:
+            TelegramAdminAlertService().send_pod_needed_alert(
+                session,
+                job_id=job_id,
+                reason=reason,
+            )
+            TelegramAdminAlertService().send_queue_pressure_alert_if_needed(session)
+    except Exception:
+        logger.warning("Admin pod-needed alert failed job_id=%s", job_id)
 
 
 def _build_waiting_notification_once(
@@ -1036,11 +1052,13 @@ def _generate_comfyui_segment(
     output_dir: Path,
 ) -> Path:
     logger.info(
-        "Segment generation started job_id=%s segment_index=%s duration=%s frame_count=%s",
+        "Segment generation started job_id=%s segment_index=%s duration=%s "
+        "frame_count=%s model_profile=%s",
         context.job_id,
         segment.segment_index,
         segment.duration_seconds,
         segment.frame_count,
+        settings.comfyui_model_profile_normalized,
     )
     image_upload = client.upload_image(
         input_image_path,
@@ -1065,6 +1083,7 @@ def _generate_comfyui_segment(
         fps=context.fps,
         frame_count=segment.frame_count,
         filename_prefix=filename_prefix,
+        model_profile=settings.comfyui_model_profile_normalized,
     )
     prompt_id = client.queue_prompt(prompt)
     logger.info(

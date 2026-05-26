@@ -15,6 +15,7 @@ from backend.app.models.generation_job import GenerationJob
 from backend.app.models.runpod_pod import RunpodPod
 from shared.app.config import Settings, get_settings
 from shared.app.enums import PodStatus
+from worker.app.services.admin_alerts import TelegramAdminAlertService
 from worker.app.services.runpod import (
     ComfyUINotReadyError,
     NoGpuAvailableError,
@@ -25,6 +26,7 @@ from worker.app.services.runpod import (
     RunPodPoolFullError,
 )
 from worker.app.services.runpod_costs import RunPodCostService
+from worker.app.services.runpod_discovery import RunPodDiscoveryService
 
 logger = logging.getLogger(__name__)
 
@@ -69,41 +71,23 @@ class RunPodManager:
                 managed=False,
             )
 
-        existing_pods = self._get_assignable_existing_pods(session)
-        session.commit()
-        assignable_count = 0
-        for existing in existing_pods:
-            if existing.base_url is None:
-                continue
-            logger.info(
-                "RunPod checking assignable pod pod_id=%s status=%s",
-                existing.runpod_pod_id,
-                existing.status,
-            )
-            if self._healthcheck(existing.base_url):
-                assignable_count += 1
-                logger.info(
-                    "RunPod assignable pod found pod_id=%s previous_status=%s",
-                    existing.runpod_pod_id,
-                    existing.status,
-                )
-                if self._try_mark_pod_busy(session, existing, job_id):
-                    logger.info(
-                        "RunPod assigning existing idle pod pod_id=%s job_id=%s",
-                        existing.runpod_pod_id,
-                        job_id,
-                    )
-                    logger.info("RunPod reusing existing pod pod_id=%s", existing.runpod_pod_id)
-                    return ManagedComfyUIEndpoint(
-                        base_url=existing.base_url,
-                        managed=True,
-                        runpod_pod_id=existing.runpod_pod_id,
-                        db_pod_id=existing.id,
-                    )
-                logger.info(
-                    "RunPod existing pod assignment skipped after lock pod_id=%s",
-                    existing.runpod_pod_id,
-                )
+        existing_endpoint = self._try_assign_existing_endpoint(session, job_id=job_id)
+        if existing_endpoint is not None:
+            return existing_endpoint
+
+        if self._settings.runpod_discovery_enabled:
+            try:
+                discovery_result = RunPodDiscoveryService(
+                    self._settings,
+                    runpod_client=self._client,
+                ).sync_active_pods(session)
+                logger.info("RunPod discovery before create result=%s", discovery_result.as_dict())
+            except Exception as exc:
+                logger.warning("RunPod discovery before create failed error=%s", exc)
+
+            existing_endpoint = self._try_assign_existing_endpoint(session, job_id=job_id)
+            if existing_endpoint is not None:
+                return existing_endpoint
 
         active_count = self._count_active_pods(session)
         cold_or_busy_count = self._count_busy_or_cold_pods(session)
@@ -113,7 +97,7 @@ class RunPodManager:
             "RunPod active capacity count active_count=%s assignable_count=%s "
             "max_active_pods=%s",
             active_count,
-            assignable_count,
+            0,
             max_active_pods,
         )
         if cold_or_busy_count > 0:
@@ -217,6 +201,11 @@ class RunPodManager:
                 self._client.terminate_pod(pod.runpod_pod_id)
             except RunPodError:
                 logger.exception("RunPod idle pod termination failed pod_id=%s", pod.runpod_pod_id)
+                TelegramAdminAlertService(self._settings).send_text_alert(
+                    "⚠️ Не удалось удалить idle RunPod pod\n\n"
+                    f"Pod ID: {pod.runpod_pod_id}\n"
+                    "Проверь RunPod UI и worker logs."
+                )
                 continue
 
             with session.begin():
@@ -252,6 +241,51 @@ class RunPodManager:
             .order_by(RunpodPod.updated_at.desc())
         )
         return list(session.execute(statement).scalars())
+
+    def _try_assign_existing_endpoint(
+        self,
+        session: Session,
+        *,
+        job_id: UUID | None,
+    ) -> ManagedComfyUIEndpoint | None:
+        existing_pods = self._get_assignable_existing_pods(session)
+        session.commit()
+        assignable_count = 0
+        for existing in existing_pods:
+            if existing.base_url is None:
+                continue
+            logger.info(
+                "RunPod checking assignable pod pod_id=%s status=%s",
+                existing.runpod_pod_id,
+                existing.status,
+            )
+            if self._healthcheck(existing.base_url):
+                assignable_count += 1
+                logger.info(
+                    "RunPod assignable pod found pod_id=%s previous_status=%s",
+                    existing.runpod_pod_id,
+                    existing.status,
+                )
+                if self._try_mark_pod_busy(session, existing, job_id):
+                    logger.info(
+                        "RunPod assigning existing idle pod pod_id=%s job_id=%s",
+                        existing.runpod_pod_id,
+                        job_id,
+                    )
+                    logger.info("RunPod reusing existing pod pod_id=%s", existing.runpod_pod_id)
+                    return ManagedComfyUIEndpoint(
+                        base_url=existing.base_url,
+                        managed=True,
+                        runpod_pod_id=existing.runpod_pod_id,
+                        db_pod_id=existing.id,
+                    )
+                logger.info(
+                    "RunPod existing pod assignment skipped after lock pod_id=%s",
+                    existing.runpod_pod_id,
+                )
+        if assignable_count == 0:
+            logger.info("RunPod no healthy assignable pod found")
+        return None
 
     def _should_wait_instead_of_cold_start(
         self,

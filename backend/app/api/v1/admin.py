@@ -53,11 +53,18 @@ from backend.app.schemas.admin import (
     AdminOverviewRunPod,
     AdminPaymentListItem,
     AdminPaymentsResponse,
+    AdminRunPodCleanupIdleRequest,
+    AdminRunPodCleanupIdleResponse,
+    AdminRunPodHealthCheckResponse,
     AdminRunPodPodItem,
     AdminRunPodPodsResponse,
+    AdminRunPodSkippedPod,
+    AdminRunPodSyncResponse,
     AdminUserListItem,
     AdminUsersResponse,
     AdminUserSummary,
+    AdminWaitingPodJobItem,
+    AdminWaitingPodJobsResponse,
     BusinessMemberAddRequest,
     BusinessMemberRemoveRequest,
     FailRefundJobRequest,
@@ -87,8 +94,11 @@ from shared.app.enums import (
     PodStatus,
 )
 from shared.app.exceptions import AppError
+from worker.app.database import get_worker_session
 from worker.app.services.runpod import RunPodError
 from worker.app.services.runpod_costs import RunPodCostService, calculate_gross_margin
+from worker.app.services.runpod_discovery import RunPodDiscoveryResult, RunPodDiscoveryService
+from worker.app.services.runpod_manager import RunPodManager
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -174,6 +184,40 @@ async def list_admin_jobs(
     return AdminJobsResponse(items=items, limit=limit, offset=offset)
 
 
+@router.get("/jobs/waiting-pod", response_model=AdminWaitingPodJobsResponse)
+async def list_admin_waiting_pod_jobs(
+    session: SessionDep,
+    _: AdminDep,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> AdminWaitingPodJobsResponse:
+    result = await session.execute(
+        select(GenerationJob, User)
+        .join(User, User.id == GenerationJob.user_id)
+        .where(GenerationJob.status == JobStatus.WAITING_FOR_POD.value)
+        .order_by(GenerationJob.waiting_for_pod_since.asc().nullsfirst())
+        .limit(limit)
+    )
+    now = datetime.now(UTC)
+    items: list[AdminWaitingPodJobItem] = []
+    for job, user in result.all():
+        waiting_since = job.waiting_for_pod_since or job.updated_at or job.created_at
+        waiting_minutes = max(0, int((now - waiting_since).total_seconds() // 60))
+        items.append(
+            AdminWaitingPodJobItem(
+                id=job.id,
+                short_id=str(job.id)[:8],
+                telegram_id=user.telegram_id,
+                username=user.username,
+                audio_duration_seconds=job.audio_duration_seconds,
+                waiting_minutes=waiting_minutes,
+                price_usd=job.price_usd,
+                created_at=job.created_at,
+                waiting_for_pod_since=job.waiting_for_pod_since,
+            )
+        )
+    return AdminWaitingPodJobsResponse(items=items, limit=limit)
+
+
 @router.get("/payments", response_model=AdminPaymentsResponse)
 async def list_admin_payments(
     session: SessionDep,
@@ -202,6 +246,82 @@ async def list_admin_runpod_pods(
 ) -> AdminRunPodPodsResponse:
     result = await session.execute(select(RunpodPod).order_by(desc(RunpodPod.created_at)))
     return AdminRunPodPodsResponse(items=[_admin_runpod_pod_item(pod) for pod in result.scalars()])
+
+
+@router.post("/runpod/pods/sync", response_model=AdminRunPodSyncResponse)
+async def admin_sync_runpod_pods(
+    payload: RetryWaitingJobsRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminRunPodSyncResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    result = await anyio.to_thread.run_sync(_sync_runpod_pods_from_runpod)
+    async with session.begin():
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="runpod_pods_sync",
+            request=request,
+            target_type="runpod_pods",
+            metadata={"reason": reason, **result.as_dict()},
+        )
+        audit_log_id = audit_log.id
+    return _admin_runpod_sync_response(result, audit_log_id=audit_log_id)
+
+
+@router.post("/runpod/pods/check-health", response_model=AdminRunPodHealthCheckResponse)
+async def admin_check_runpod_pod_health(
+    payload: RetryWaitingJobsRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminRunPodHealthCheckResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    result = await anyio.to_thread.run_sync(_check_runpod_pod_health_sync)
+    async with session.begin():
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="runpod_pods_check_health",
+            request=request,
+            target_type="runpod_pods",
+            metadata={"reason": reason, **result.as_dict()},
+        )
+        audit_log_id = audit_log.id
+    return AdminRunPodHealthCheckResponse(
+        checked=result.found,
+        healthy=result.healthy,
+        unhealthy=len(result.skipped),
+        skipped=[AdminRunPodSkippedPod(**item.as_dict()) for item in result.skipped],
+        audit_log_id=audit_log_id,
+    )
+
+
+@router.post("/runpod/pods/cleanup-idle", response_model=AdminRunPodCleanupIdleResponse)
+async def admin_cleanup_idle_runpod_pods(
+    payload: AdminRunPodCleanupIdleRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> AdminRunPodCleanupIdleResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    terminated_pod_ids = await anyio.to_thread.run_sync(_cleanup_idle_runpod_pods_sync)
+    async with session.begin():
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="runpod_cleanup_idle_pods",
+            request=request,
+            target_type="runpod_pods",
+            metadata={"reason": reason, "terminated_pod_ids": terminated_pod_ids},
+        )
+        audit_log_id = audit_log.id
+    return AdminRunPodCleanupIdleResponse(
+        terminated_count=len(terminated_pod_ids),
+        terminated_pod_ids=terminated_pod_ids,
+        audit_log_id=audit_log_id,
+    )
 
 
 @router.get("/business-accounts", response_model=AdminBusinessAccountsResponse)
@@ -1006,10 +1126,14 @@ def _admin_runpod_pod_item(pod: RunpodPod) -> AdminRunPodPodItem:
         gpu_type=pod.gpu_type,
         base_url=pod.base_url,
         active_job_id=pod.active_job_id or pod.current_job_id,
+        current_job_id=pod.current_job_id,
+        health_status=_pod_health_status(pod),
         created_at=pod.created_at,
         updated_at=pod.updated_at,
         last_healthcheck_at=pod.last_healthcheck_at,
+        last_heartbeat_at=pod.last_heartbeat_at,
         last_used_at=pod.last_used_at,
+        last_busy_at=pod.last_busy_at,
         terminated_at=pod.terminated_at,
         estimated_runtime_seconds=_pod_runtime_seconds(pod),
         estimated_hourly_cost_usd=_pod_estimated_hourly_cost(pod),
@@ -1551,6 +1675,50 @@ def _pod_estimated_hourly_cost(pod: RunpodPod) -> Decimal | None:
 
 def _pod_estimated_startup_surcharge(pod: RunpodPod) -> Decimal | None:
     return RunPodCostService().get_startup_surcharge(cloud_type=pod.cloud_type)
+
+
+def _pod_health_status(pod: RunpodPod) -> str:
+    if pod.terminated_at is not None or pod.status in {
+        PodStatus.FAILED.value,
+        PodStatus.TERMINATED.value,
+        PodStatus.DELETED.value,
+    }:
+        return "unhealthy"
+    if pod.last_healthcheck_at is not None and pod.error_message is None:
+        return "healthy"
+    if pod.error_message:
+        return "unhealthy"
+    return "unknown"
+
+
+def _sync_runpod_pods_from_runpod() -> RunPodDiscoveryResult:
+    with get_worker_session() as sync_session:
+        return RunPodDiscoveryService().sync_active_pods(sync_session)
+
+
+def _check_runpod_pod_health_sync() -> RunPodDiscoveryResult:
+    with get_worker_session() as sync_session:
+        return RunPodDiscoveryService().check_registered_pods_health(sync_session)
+
+
+def _cleanup_idle_runpod_pods_sync() -> list[str]:
+    with get_worker_session() as sync_session:
+        return RunPodManager().terminate_idle_pods(sync_session, force=False)
+
+
+def _admin_runpod_sync_response(
+    result: RunPodDiscoveryResult,
+    *,
+    audit_log_id: UUID | None,
+) -> AdminRunPodSyncResponse:
+    return AdminRunPodSyncResponse(
+        found=result.found,
+        registered=result.registered,
+        updated=result.updated,
+        healthy=result.healthy,
+        skipped=[AdminRunPodSkippedPod(**item.as_dict()) for item in result.skipped],
+        audit_log_id=audit_log_id,
+    )
 
 
 def _money(value: Any) -> Decimal:

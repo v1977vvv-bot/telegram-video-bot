@@ -229,11 +229,12 @@ class DistributedSegmentGenerationService:
     ) -> Path:
         logger.info(
             "Distributed segment generation started job_id=%s segment_index=%s "
-            "duration=%s frame_count=%s",
+            "duration=%s frame_count=%s model_profile=%s",
             context.job_id,
             segment.segment_index,
             segment.duration_seconds,
             segment.frame_count,
+            self._settings.comfyui_model_profile_normalized,
         )
         image_upload = client.upload_image(
             input_image_path,
@@ -258,6 +259,7 @@ class DistributedSegmentGenerationService:
             fps=context.fps,
             frame_count=segment.frame_count,
             filename_prefix=filename_prefix,
+            model_profile=self._settings.comfyui_model_profile_normalized,
         )
         prompt_id = client.queue_prompt(prompt)
         self._mark_segment_generating(segment.id, prompt_id)

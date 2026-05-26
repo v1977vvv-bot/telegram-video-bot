@@ -72,6 +72,7 @@ def build_config_sanity_result(settings: Settings) -> ConfigSanityResult:
         _require_payment_package_config(result, settings)
         _require_payment_provider_config(result, settings)
         _require_runpod_cost_config(result, settings)
+        _require_comfyui_config(result, settings)
         _require_admin_config(result, settings)
         _require_production_safety_defaults(result, settings)
     else:
@@ -82,6 +83,7 @@ def build_config_sanity_result(settings: Settings) -> ConfigSanityResult:
         _warn_if_payment_package_config_invalid(result, settings)
         _warn_if_payment_provider_config_invalid(result, settings)
         _warn_if_runpod_cost_config_invalid(result, settings)
+        _warn_if_comfyui_config_invalid(result, settings)
         _warn_if_admin_config_invalid(result, settings)
 
     _warn_for_launch_risky_values(result, settings)
@@ -139,8 +141,8 @@ def _require_production_safety_defaults(
     result: ConfigSanityResult,
     settings: Settings,
 ) -> None:
-    if settings.debug_endpoints_enabled and not settings.debug_endpoints_local_only:
-        result.errors.append("Debug endpoints must be disabled or local-only in production")
+    if settings.debug_endpoints_enabled:
+        result.errors.append("DEBUG_ENDPOINTS_ENABLED must be false in production")
     if settings.distributed_segment_generation_enabled:
         result.errors.append(
             "DISTRIBUTED_SEGMENT_GENERATION_ENABLED must stay false for MVP launch"
@@ -232,7 +234,31 @@ def _require_runpod_cost_config(result: ConfigSanityResult, settings: Settings) 
         result.errors.append(error)
 
 
+def _require_comfyui_config(result: ConfigSanityResult, settings: Settings) -> None:
+    try:
+        _ = settings.comfyui_model_profile_normalized
+    except ValueError as exc:
+        result.errors.append(str(exc))
+
+
 def _require_admin_config(result: ConfigSanityResult, settings: Settings) -> None:
+    if settings.admin_bot_token_is_configured:
+        if not settings.admin_telegram_id_set:
+            result.errors.append(
+                "ADMIN_TELEGRAM_IDS must be configured when ADMIN_BOT_TOKEN is set"
+            )
+        if not settings.admin_internal_api_token_configured:
+            result.errors.append(
+                "ADMIN_INTERNAL_API_TOKEN must be configured when ADMIN_BOT_TOKEN is set"
+            )
+    if settings.admin_internal_api_token.strip() and len(settings.admin_internal_api_token) < 24:
+        result.errors.append("ADMIN_INTERNAL_API_TOKEN must be at least 24 characters when set")
+    if settings.admin_actions_enabled:
+        if settings.admin_max_manual_topup_usd <= Decimal("0"):
+            result.errors.append("ADMIN_MAX_MANUAL_TOPUP_USD must be positive")
+        if settings.admin_max_manual_topup_usd > Decimal("10000"):
+            result.errors.append("ADMIN_MAX_MANUAL_TOPUP_USD is above the MVP safety cap")
+
     if not settings.admin_panel_enabled:
         return
     if not settings.admin_basic_auth_enabled:
@@ -246,13 +272,6 @@ def _require_admin_config(result: ConfigSanityResult, settings: Settings) -> Non
         result.errors.append(
             "ADMIN_BASIC_AUTH_PASSWORD must be configured and at least 12 characters"
         )
-    if settings.admin_actions_enabled:
-        if not settings.admin_panel_enabled:
-            result.errors.append("ADMIN_PANEL_ENABLED must be true when ADMIN_ACTIONS_ENABLED=true")
-        if settings.admin_max_manual_topup_usd <= Decimal("0"):
-            result.errors.append("ADMIN_MAX_MANUAL_TOPUP_USD must be positive")
-        if settings.admin_max_manual_topup_usd > Decimal("10000"):
-            result.errors.append("ADMIN_MAX_MANUAL_TOPUP_USD is above the MVP safety cap")
 
 
 def _warn_if_payment_package_config_invalid(
@@ -273,7 +292,38 @@ def _warn_if_runpod_cost_config_invalid(
         result.warnings.append(error)
 
 
+def _warn_if_comfyui_config_invalid(
+    result: ConfigSanityResult,
+    settings: Settings,
+) -> None:
+    try:
+        _ = settings.comfyui_model_profile_normalized
+    except ValueError as exc:
+        result.warnings.append(str(exc))
+
+
 def _warn_if_admin_config_invalid(result: ConfigSanityResult, settings: Settings) -> None:
+    if settings.admin_bot_token_is_configured:
+        if not settings.admin_telegram_id_set:
+            result.warnings.append(
+                "ADMIN_TELEGRAM_IDS is empty while ADMIN_BOT_TOKEN is configured"
+            )
+        if not settings.admin_internal_api_token_configured:
+            result.warnings.append(
+                "ADMIN_INTERNAL_API_TOKEN is not configured while ADMIN_BOT_TOKEN is configured"
+            )
+        if not settings.admin_actions_enabled:
+            result.warnings.append(
+                "ADMIN_ACTIONS_ENABLED=false; Telegram admin write buttons will be disabled"
+            )
+    if settings.admin_internal_api_token.strip() and len(settings.admin_internal_api_token) < 24:
+        result.warnings.append("ADMIN_INTERNAL_API_TOKEN is shorter than 24 characters")
+    if settings.admin_actions_enabled:
+        if settings.admin_max_manual_topup_usd <= Decimal("0"):
+            result.warnings.append("ADMIN_MAX_MANUAL_TOPUP_USD must be positive")
+        if settings.admin_max_manual_topup_usd > Decimal("10000"):
+            result.warnings.append("ADMIN_MAX_MANUAL_TOPUP_USD is above the MVP safety cap")
+
     if not settings.admin_panel_enabled:
         return
     if not settings.admin_basic_auth_enabled:
@@ -284,10 +334,6 @@ def _warn_if_admin_config_invalid(result: ConfigSanityResult, settings: Settings
         result.warnings.append("ADMIN_BASIC_AUTH_PASSWORD is not configured")
     elif len(settings.admin_basic_auth_password) < 12:
         result.warnings.append("ADMIN_BASIC_AUTH_PASSWORD is shorter than 12 characters")
-    if settings.admin_actions_enabled and not settings.admin_panel_enabled:
-        result.warnings.append("ADMIN_ACTIONS_ENABLED=true while ADMIN_PANEL_ENABLED=false")
-    if settings.admin_max_manual_topup_usd <= Decimal("0"):
-        result.warnings.append("ADMIN_MAX_MANUAL_TOPUP_USD must be positive")
 
 
 def _runpod_cost_config_errors(settings: Settings) -> list[str]:
@@ -360,6 +406,10 @@ def _warn_for_launch_risky_values(result: ConfigSanityResult, settings: Settings
         )
     if settings.admin_actions_enabled:
         result.warnings.append("ADMIN_ACTIONS_ENABLED=true; restrict operator access carefully")
+    if settings.admin_alerts_enabled and not settings.admin_bot_token_is_configured:
+        result.warnings.append(
+            "ADMIN_BOT_TOKEN is not configured; admin alerts fall back to TELEGRAM_BOT_TOKEN"
+        )
     if _contains_rtx_5090(settings.runpod_allowed_gpu_type_list):
         result.warnings.append("RUNPOD_ALLOWED_GPU_TYPES includes RTX 5090; it is disabled for now")
     if _contains_rtx_5090(settings.runpod_fallback_allowed_gpu_type_list):

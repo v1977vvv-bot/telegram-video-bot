@@ -354,8 +354,10 @@ curl -u admin:replace_with_a_strong_password \
   -d '{"reason":"Terminate idle/stuck pod"}'
 ```
 
-Every admin action requires Basic Auth, `ADMIN_PANEL_ENABLED=true`,
+Browser admin actions require Basic Auth, `ADMIN_PANEL_ENABLED=true`,
 `ADMIN_ACTIONS_ENABLED=true`, and a reason when `ADMIN_REQUIRE_ACTION_REASON=true`.
+Telegram/internal admin actions require `Authorization: Bearer
+<ADMIN_INTERNAL_API_TOKEN>` and `ADMIN_ACTIONS_ENABLED=true`.
 Actions write `admin_audit_logs`. Balance changes always go through balance ledger
 transactions. Telegram notifications are attempted for top-ups, business membership
 changes, and fail-refund, but notification failure does not roll back the action.
@@ -436,6 +438,7 @@ ComfyUI settings:
 GENERATION_MODE=mock
 COMFYUI_BASE_URL=http://localhost:8188
 COMFYUI_WORKFLOW_PATH=/app/workflows/infinite_talk_api.json
+COMFYUI_MODEL_PROFILE=fp8_480p
 COMFYUI_TIMEOUT_SECONDS=7200
 COMFYUI_POLL_INTERVAL_SECONDS=5
 COMFYUI_TRANSIENT_RETRY_MAX_ATTEMPTS=5
@@ -453,6 +456,15 @@ AUDIO_SEGMENT_MIN_SECONDS=8
 
 - `COMFYUI_BASE_URL` is the base ComfyUI URL without a fragment/hash.
 - `COMFYUI_WORKFLOW_PATH` is the in-container path to the API workflow JSON.
+- `COMFYUI_MODEL_PROFILE` selects the production model names patched into the workflow:
+  - `fp8_480p` is the default production profile. It uses
+    `wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors` and
+    `Wan2_1-InfiniteTalk-Multi_fp8_e4m3fn_scaled_KJ.safetensors`.
+  - `gguf_q8_480p` preserves the current fallback behavior with
+    `WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf` and
+    `WanVideo/InfiniteTalk/Wan2_1-InfiniteTalk_Single_Q8.gguf`.
+  - `fp8_720p` is documented as a future quality mode. It patches the 720p Wan FP8
+    model name, but should stay experimental until the 720p workflow is validated.
 - `COMFYUI_TIMEOUT_SECONDS` is the maximum generation wait time.
 - `COMFYUI_POLL_INTERVAL_SECONDS` is the polling interval for status checks.
 - `COMFYUI_TRANSIENT_RETRY_MAX_ATTEMPTS` controls per-request retry attempts for
@@ -723,8 +735,10 @@ ComfyUI/models/diffusion_models/
 Recommended test order:
 
 1. Test 480p FP8 first with `DOWNLOAD_WAN_FP8_480P=1` and
-   `DOWNLOAD_INFINITETALK_FP8=1`.
+   `DOWNLOAD_INFINITETALK_FP8=1`, then set `COMFYUI_MODEL_PROFILE=fp8_480p`.
 2. Test 720p FP8 second by also enabling `DOWNLOAD_WAN_FP8_720P=1`.
+   Use `COMFYUI_MODEL_PROFILE=fp8_720p` only as an experimental placeholder until
+   the 720p workflow is validated end to end.
 3. Compare both against the GGUF Q8 baseline: 531.16 seconds for a 60 second video.
 
 The RunPod image startup log lists available WanVideo and InfiniteTalk model files in
@@ -1595,6 +1609,166 @@ ComfyUI troubleshooting:
 - `404` on `/view`: the filename, subfolder, or output type returned by history does
   not match the file on the ComfyUI side.
 - RunPod proxy URL must be the base URL without `#...`.
+
+## RunPod manual UI + auto discovery
+
+Production can recover from RunPod REST capacity misses without exposing debug
+endpoints. If the worker cannot create a pod automatically, an operator can create the
+pod manually in RunPod UI. The backend then discovers active account pods through the
+RunPod API, healthchecks ComfyUI, registers matching pods in `runpod_pods`, and retrying
+waiting jobs can use them as normal idle capacity.
+
+Recommended production env for discovery and mobile admin operations:
+
+```env
+RUNPOD_DISCOVERY_ENABLED=true
+RUNPOD_DISCOVERY_INTERVAL_SECONDS=60
+RUNPOD_DISCOVERY_AUTO_REGISTER=true
+RUNPOD_DISCOVERY_REQUIRE_HEALTHY=true
+
+ADMIN_TELEGRAM_IDS=123456789
+ADMIN_BOT_TOKEN=123456789:admin-bot-token
+ADMIN_INTERNAL_API_TOKEN=change-to-a-long-random-token
+
+ADMIN_ALERTS_ENABLED=true
+ADMIN_ALERT_CHAT_ID=123456789
+ADMIN_POD_ALERT_COOLDOWN_MINUTES=15
+ADMIN_QUEUE_ALERT_COOLDOWN_MINUTES=20
+ADMIN_QUEUE_ALERT_MIN_WAITING_JOBS=2
+ADMIN_QUEUE_ALERT_TARGET_WAIT_MINUTES=10
+ADMIN_QUEUE_ALERT_REPEAT_ENABLED=true
+```
+
+For RTX PRO 6000 Blackwell tests, keep the image/template unchanged and configure GPU
+selection through env:
+
+```env
+RUNPOD_ALLOWED_GPU_TYPES=NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+RUNPOD_FALLBACK_ALLOWED_GPU_TYPES=NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+RUNPOD_CUDA_VERSION=13.0
+RUNPOD_ALLOWED_CUDA_VERSIONS=13.0
+RUNPOD_FALLBACK_ALLOWED_CUDA_VERSIONS=13.0
+```
+
+Manual RunPod UI flow:
+
+1. Open RunPod and create a pod from the configured `RUNPOD_TEMPLATE_ID`.
+2. Use the same ComfyUI HTTP port as `RUNPOD_COMFYUI_PORT` (`8188` by default).
+3. Select a GPU type that is present in `RUNPOD_ALLOWED_GPU_TYPES` or
+   `RUNPOD_FALLBACK_ALLOWED_GPU_TYPES`.
+4. Wait until ComfyUI is reachable at
+   `https://{pod_id}-{RUNPOD_COMFYUI_PORT}.proxy.runpod.net/system_stats`.
+5. In web admin, open `/admin/runpod` and click `Sync from RunPod`.
+6. Click `Retry waiting jobs` so `waiting_for_pod` jobs are queued again.
+
+The same flow is available from Telegram for operators listed in `ADMIN_TELEGRAM_IDS`:
+
+```text
+/admin
+🔄 Sync RunPod pods
+🚀 Retry waiting jobs
+```
+
+Telegram admin actions call the backend with `Authorization: Bearer
+<ADMIN_INTERNAL_API_TOKEN>`. If the token is empty, bearer admin access is disabled and
+only the web admin Basic Auth/session path works. Bearer access is independent of the
+web admin UI flag, so the Telegram admin bot can operate with `ADMIN_PANEL_ENABLED=false`.
+Write actions still require `ADMIN_ACTIONS_ENABLED=true` and are recorded in
+`admin_audit_logs` as `telegram_admin:{telegram_id}` when called from Telegram.
+
+### Separate Telegram Admin Bot
+
+Production should use a separate Telegram bot for operator controls and alerts. The
+main user bot stays focused on user generation/payment flows, while the admin bot owns
+`/admin`, inline alert buttons, RunPod sync, healthchecks, cleanup, and waiting-job
+retry controls.
+
+Setup:
+
+1. Create a new bot in BotFather, for example `SynzAI Admin`.
+2. Put its token in `.env.production` as `ADMIN_BOT_TOKEN`.
+3. Add operator Telegram ids to `ADMIN_TELEGRAM_IDS`.
+4. Set `ADMIN_INTERNAL_API_TOKEN` to a long random token. The admin bot uses it for
+   backend write actions.
+5. Set `ADMIN_ALERT_CHAT_ID` to your personal chat, private group, or channel where
+   the admin bot can post.
+6. Set `ADMIN_ACTIONS_ENABLED=true` if Telegram buttons must run write actions such
+   as `Sync RunPod pods`, `Check pod health`, `Cleanup idle pods`, or
+   `Retry waiting jobs`.
+7. Deploy the `admin_bot` compose service.
+
+Minimum production env for the separate admin bot:
+
+```env
+ADMIN_BOT_TOKEN=123456789:admin-bot-token
+ADMIN_TELEGRAM_IDS=123456789
+ADMIN_INTERNAL_API_TOKEN=change-to-a-long-random-token
+ADMIN_ACTIONS_ENABLED=true
+ADMIN_ALERTS_ENABLED=true
+ADMIN_ALERT_CHAT_ID=123456789
+```
+
+`ADMIN_PANEL_ENABLED=true` is only needed for the browser-based web admin. Keep it
+`false` if you only want the Telegram admin bot and alerts.
+
+To find `ADMIN_ALERT_CHAT_ID`, send any message to the admin bot or add it to a private
+group, then inspect Telegram updates with your usual bot tooling or a temporary local
+script. For groups/channels the id is usually negative. Do not commit the id together
+with any token.
+
+Production compose includes a separate service:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build backend bot worker admin_bot
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build admin_bot
+docker compose -f docker-compose.prod.yml --env-file .env.production logs -f admin_bot
+```
+
+If `ADMIN_BOT_TOKEN` is set, the main `bot` service does not register `/admin`.
+If `ADMIN_BOT_TOKEN` is empty, the main bot keeps `/admin` as a fallback and admin
+alerts fall back to `TELEGRAM_BOT_TOKEN`.
+
+Admin bot smoke test:
+
+1. Start `backend`, `bot`, `worker`, and `admin_bot`.
+2. Send `/admin` to the admin bot from a Telegram id listed in `ADMIN_TELEGRAM_IDS`.
+3. Confirm the menu shows `Sync RunPod pods`, `Check pod health`, `Retry waiting jobs`,
+   `Waiting jobs`, `Pod’ы`, `Cleanup idle pods`, and `Web admin`.
+4. Press `Sync RunPod pods`; the response should show found/registered/updated/healthy
+   counts.
+5. Press `Retry waiting jobs`; eligible `waiting_for_pod` jobs should be enqueued.
+6. Send `/admin` to the main user bot. With `ADMIN_BOT_TOKEN` configured it should not
+   expose the admin menu.
+
+Admin alerts:
+
+- A single job alert is sent when a job enters `waiting_for_pod` because there is no
+  assignable pod, the pool is full, auto-create hit capacity, or all pod healthchecks
+  failed.
+- A queue pressure alert is sent when the waiting queue grows, the oldest
+  `waiting_for_pod` job waits past the target, or there are waiting jobs with no healthy
+  idle pods.
+- Alerts include inline buttons for `Sync pods`, `Retry waiting`, and web admin.
+- Cooldowns prevent repeated identical alerts.
+
+Useful commands:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.production logs -f worker
+docker compose -f docker-compose.prod.yml --env-file .env.production logs -f bot
+docker compose -f docker-compose.prod.yml --env-file .env.production logs -f backend
+```
+
+Successful discovery logs include:
+
+```text
+RunPod discovery registered pod pod_id=... gpu_type=... cloud_type=... healthy=True
+RunPod assigning existing idle pod pod_id=... job_id=...
+```
+
+Debug endpoints are not required for this production recovery flow and should remain
+disabled in production. The supported operator paths are web admin, Telegram admin, and
+the discovery task/keeper.
 
 ## Next stages
 

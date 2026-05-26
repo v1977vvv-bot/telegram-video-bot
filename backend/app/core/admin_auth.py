@@ -27,7 +27,13 @@ def require_admin_auth(
     request: Request,
     credentials: Annotated[HTTPBasicCredentials | None, Depends(security)],
 ) -> AdminPrincipal:
-    settings = require_admin_enabled()
+    settings = get_settings()
+    bearer_principal = _admin_bearer_principal(request, settings)
+    if bearer_principal is not None:
+        request.state.admin_identifier = bearer_principal
+        return AdminPrincipal(bearer_principal)
+
+    settings = require_admin_enabled(settings)
     if not settings.admin_basic_auth_enabled:
         raise AppError("Admin auth is disabled", code="admin_auth_disabled", status_code=403)
 
@@ -53,7 +59,7 @@ def require_admin_auth(
 
 
 def require_admin_actions_enabled() -> Settings:
-    settings = require_admin_enabled()
+    settings = get_settings()
     if not settings.admin_actions_enabled:
         raise AppError(
             "Admin actions are disabled",
@@ -69,3 +75,31 @@ def _basic_challenge() -> HTTPException:
         detail="Admin authentication required",
         headers={"WWW-Authenticate": "Basic"},
     )
+
+
+def _admin_bearer_principal(request: Request, settings: Settings) -> str | None:
+    if not settings.admin_internal_api_token_configured:
+        return None
+    authorization = request.headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    if not secrets.compare_digest(token, settings.admin_internal_api_token.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin authentication required",
+        )
+    telegram_id = request.headers.get("x-admin-telegram-id", "").strip()
+    if telegram_id:
+        if not telegram_id.isdigit():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Telegram admin is not allowed",
+            )
+        if int(telegram_id) not in settings.admin_telegram_id_set:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Telegram admin is not allowed",
+            )
+        return f"telegram_admin:{telegram_id}"
+    return "internal_admin"

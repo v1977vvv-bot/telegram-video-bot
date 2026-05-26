@@ -142,10 +142,14 @@ class AdminRunPodPodItem(BaseModel):
     gpu_type: str | None
     base_url: str | None
     active_job_id: UUID | None
+    current_job_id: UUID | None = None
+    health_status: str | None = None
     created_at: datetime
     updated_at: datetime
     last_healthcheck_at: datetime | None
+    last_heartbeat_at: datetime | None = None
     last_used_at: datetime | None
+    last_busy_at: datetime | None = None
     terminated_at: datetime | None
     estimated_runtime_seconds: int | None
     estimated_hourly_cost_usd: Decimal | None
@@ -155,6 +159,58 @@ class AdminRunPodPodItem(BaseModel):
 
 class AdminRunPodPodsResponse(BaseModel):
     items: list[AdminRunPodPodItem]
+
+
+class AdminRunPodSkippedPod(BaseModel):
+    pod_id: str
+    reason: str
+    status: str | None = None
+    gpu_type: str | None = None
+    template_id: str | None = None
+
+
+class AdminRunPodSyncResponse(BaseModel):
+    found: int
+    registered: int
+    updated: int
+    healthy: int
+    skipped: list[AdminRunPodSkippedPod]
+    audit_log_id: UUID | None = None
+
+
+class AdminRunPodHealthCheckResponse(BaseModel):
+    checked: int
+    healthy: int
+    unhealthy: int
+    skipped: list[AdminRunPodSkippedPod]
+    audit_log_id: UUID | None = None
+
+
+class AdminRunPodCleanupIdleRequest(BaseModel):
+    reason: str
+
+
+class AdminRunPodCleanupIdleResponse(BaseModel):
+    terminated_count: int
+    terminated_pod_ids: list[str]
+    audit_log_id: UUID | None = None
+
+
+class AdminWaitingPodJobItem(BaseModel):
+    id: UUID
+    short_id: str
+    telegram_id: int
+    username: str | None = None
+    audio_duration_seconds: Decimal | None = None
+    waiting_minutes: int
+    price_usd: Decimal | None = None
+    created_at: datetime
+    waiting_for_pod_since: datetime | None = None
+
+
+class AdminWaitingPodJobsResponse(BaseModel):
+    items: list[AdminWaitingPodJobItem]
+    limit: int
 
 
 class AdminBusinessAccountListItem(BaseModel):

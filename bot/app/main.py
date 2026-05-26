@@ -8,6 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from bot.app.handlers.admin import router as admin_router
 from bot.app.handlers.debug import router as debug_router
 from bot.app.handlers.generation import router as generation_router
 from bot.app.handlers.menu import router as menu_router
@@ -33,6 +34,11 @@ async def main() -> None:
     )
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(start_router)
+    if settings.admin_bot_token_is_configured:
+        logger.info("ADMIN_BOT_TOKEN is configured; /admin is handled by admin bot")
+    else:
+        logger.info("ADMIN_BOT_TOKEN is not configured; enabling /admin fallback in user bot")
+        dispatcher.include_router(admin_router)
     dispatcher.include_router(debug_router)
     dispatcher.include_router(generation_router)
     dispatcher.include_router(menu_router)

@@ -21,6 +21,7 @@ class OpsStatusResponse(BaseModel):
     runpod_pods: dict[str, int]
     runpod_config: dict[str, object]
     runpod_costs: dict[str, object]
+    comfyui: dict[str, object]
     payments: dict[str, object]
     business: dict[str, int]
     admin: dict[str, bool]

@@ -165,6 +165,7 @@ class BotBackendClient:
         settings = get_settings()
         self._base_url = settings.backend_internal_url.rstrip("/")
         self._timeout = httpx.Timeout(120.0, connect=5.0)
+        self._admin_internal_api_token = settings.admin_internal_api_token.strip()
 
     async def upsert_telegram_user(
         self,
@@ -398,6 +399,60 @@ class BotBackendClient:
         )
         return self._parse_balance(data["balance"])
 
+    async def get_admin_overview(self, *, telegram_id: int) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            "/api/v1/admin/overview",
+            headers=self._admin_headers(telegram_id),
+        )
+
+    async def get_admin_runpod_pods(self, *, telegram_id: int) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            "/api/v1/admin/runpod/pods",
+            headers=self._admin_headers(telegram_id),
+        )
+
+    async def get_admin_waiting_pod_jobs(self, *, telegram_id: int) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            "/api/v1/admin/jobs/waiting-pod",
+            params={"limit": 10},
+            headers=self._admin_headers(telegram_id),
+        )
+
+    async def sync_runpod_pods(self, *, telegram_id: int) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/v1/admin/runpod/pods/sync",
+            json={"reason": "Telegram admin sync RunPod pods"},
+            headers=self._admin_headers(telegram_id),
+        )
+
+    async def retry_waiting_jobs(self, *, telegram_id: int) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/v1/admin/jobs/retry-waiting",
+            json={"reason": "Telegram admin retry waiting jobs"},
+            headers=self._admin_headers(telegram_id),
+        )
+
+    async def cleanup_idle_pods(self, *, telegram_id: int) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/v1/admin/runpod/pods/cleanup-idle",
+            json={"reason": "Telegram admin cleanup idle pods"},
+            headers=self._admin_headers(telegram_id),
+        )
+
+    async def check_runpod_health(self, *, telegram_id: int) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/v1/admin/runpod/pods/check-health",
+            json={"reason": "Telegram admin check RunPod health"},
+            headers=self._admin_headers(telegram_id),
+        )
+
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout) as client:
@@ -427,6 +482,14 @@ class BotBackendClient:
         if isinstance(error, dict) and isinstance(error.get("message"), str):
             return str(error["message"])
         return response.text
+
+    def _admin_headers(self, telegram_id: int) -> dict[str, str]:
+        if not self._admin_internal_api_token:
+            raise BackendClientError("Admin internal API token is not configured")
+        return {
+            "Authorization": f"Bearer {self._admin_internal_api_token}",
+            "X-Admin-Telegram-Id": str(telegram_id),
+        }
 
     def _parse_user(self, data: dict[str, Any]) -> TelegramUserDto:
         return TelegramUserDto(

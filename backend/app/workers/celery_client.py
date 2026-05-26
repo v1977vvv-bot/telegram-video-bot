@@ -8,7 +8,7 @@ from worker.app.tasks.generation import (
     retry_waiting_for_gpu_jobs,
     retry_waiting_generation_jobs,
 )
-from worker.app.tasks.runpod_keeper import runpod_keeper_tick
+from worker.app.tasks.runpod_keeper import runpod_keeper_tick, sync_runpod_pods
 
 
 def enqueue_debug_ping(message: str = "pong") -> AsyncResult:
@@ -29,3 +29,7 @@ def enqueue_retry_waiting_generation_jobs() -> AsyncResult:
 
 def enqueue_runpod_keeper_tick() -> AsyncResult:
     return runpod_keeper_tick.delay()
+
+
+def enqueue_sync_runpod_pods() -> AsyncResult:
+    return sync_runpod_pods.delay()

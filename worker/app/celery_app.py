@@ -28,6 +28,14 @@ celery_app.conf.update(
     task_track_started=True,
     timezone="UTC",
     enable_utc=True,
+    beat_schedule={
+        "sync-runpod-pods": {
+            "task": "sync_runpod_pods",
+            "schedule": max(settings.runpod_discovery_interval_seconds, 1),
+        }
+    }
+    if settings.runpod_discovery_enabled
+    else {},
 )
 
 

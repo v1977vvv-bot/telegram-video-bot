@@ -1150,6 +1150,7 @@ async def preview_debug_comfyui_workflow_patch(
             frame_count=payload.frame_count,
             input_subfolder=settings.comfyui_input_subfolder,
             output_subfolder=settings.comfyui_output_subfolder,
+            model_profile=settings.comfyui_model_profile_normalized,
         )
     except FileNotFoundError as exc:
         raise AppError(

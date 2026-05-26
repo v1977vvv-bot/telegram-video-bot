@@ -269,6 +269,25 @@ def _admin_page(page: str) -> HTMLResponse:
           <p class="muted">Use this for pending CryptoBot invoices after webhook downtime.</p>`,
         runpod: `
           <h3>RunPod controls</h3>
+          <form class="action-form" data-action="sync_runpod_pods">
+            <input name="reason" placeholder="Reason"
+              value="Sync manually created RunPod pods" required>
+            <button type="submit">Sync from RunPod</button>
+          </form>
+          <form class="action-form" data-action="check_runpod_health">
+            <input name="reason" placeholder="Reason" value="Check RunPod pod health" required>
+            <button type="submit">Check health</button>
+          </form>
+          <form class="action-form" data-action="cleanup_idle_pods">
+            <input name="reason" placeholder="Reason"
+              value="Cleanup expired idle RunPod pods" required>
+            <button type="submit">Cleanup idle pods</button>
+          </form>
+          <form class="action-form" data-action="retry_waiting">
+            <input name="reason" placeholder="Reason"
+              value="Retry waiting jobs after RunPod sync" required>
+            <button type="submit">Retry waiting jobs</button>
+          </form>
           <form class="action-form" data-action="terminate_pod">
             <input name="runpod_pod_id" placeholder="RunPod pod id" required>
             <input name="reason" placeholder="Reason" required>
@@ -342,6 +361,12 @@ def _admin_page(page: str) -> HTMLResponse:
       let body = {{ reason: data.reason }};
       if (form.dataset.action === "retry_waiting") {{
         path = "/api/v1/admin/jobs/retry-waiting";
+      }} else if (form.dataset.action === "sync_runpod_pods") {{
+        path = "/api/v1/admin/runpod/pods/sync";
+      }} else if (form.dataset.action === "check_runpod_health") {{
+        path = "/api/v1/admin/runpod/pods/check-health";
+      }} else if (form.dataset.action === "cleanup_idle_pods") {{
+        path = "/api/v1/admin/runpod/pods/cleanup-idle";
       }} else if (form.dataset.action === "personal_topup") {{
         path = `/api/v1/admin/users/${{data.user_id}}/balance/top-up`;
         body.amount_usd = data.amount_usd;

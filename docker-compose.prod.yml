@@ -81,6 +81,28 @@ services:
       redis:
         condition: service_healthy
 
+  admin_bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    env_file:
+      - path: .env.production
+        required: false
+    command:
+      - sh
+      - -c
+      - python scripts/wait_for_db.py && python -m bot.app.admin_main
+    restart: unless-stopped
+    volumes:
+      - app_storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   worker:
     build:
       context: .

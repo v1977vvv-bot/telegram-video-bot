@@ -41,6 +41,9 @@ class RunPodPodInfo:
     status: str | None
     cloud_type: str | None
     gpu_type: str | None
+    template_id: str | None
+    ports: list[str]
+    hourly_price_usd: str | None
     base_url: str
     raw: dict[str, Any]
 
@@ -138,6 +141,20 @@ class RunPodClient:
         self._raise_for_response(response, "RunPod pod lookup failed")
         return self._pod_info_from_response(response.json(), fallback_pod_id=pod_id)
 
+    def list_pods(self) -> list[RunPodPodInfo]:
+        response = self._client.get("/pods", headers=self._headers())
+        self._raise_for_response(response, "RunPod pod list failed")
+        payload = response.json()
+        pod_items = _extract_pod_items(payload)
+        pods: list[RunPodPodInfo] = []
+        for item in pod_items:
+            try:
+                pods.append(self._pod_info_from_response(item))
+            except RunPodError as exc:
+                logger.warning("RunPod pod list item skipped error=%s", exc)
+        logger.info("RunPod pod list fetched count=%s", len(pods))
+        return pods
+
     def terminate_pod(self, pod_id: str) -> None:
         response = self._client.delete(f"/pods/{pod_id}", headers=self._headers())
         if response.status_code == 404:
@@ -225,14 +242,24 @@ class RunPodClient:
         gpu_type = (
             _first_string(payload, "gpuTypeId", "gpuType", "machineType")
             or _nested_first_string(payload, ("gpu", "type"), ("gpu", "id"))
+            or _nested_first_string(payload, ("machine", "gpuTypeId"), ("machine", "gpuType"))
             or fallback_gpu_type
         )
+        template_id = _first_string(payload, "templateId", "template_id") or _nested_first_string(
+            payload,
+            ("template", "id"),
+            ("runtime", "templateId"),
+        )
+        ports = _extract_ports(payload)
         return RunPodPodInfo(
             pod_id=pod_id,
             name=_first_string(payload, "name"),
             status=_first_string(payload, "desiredStatus", "status"),
             cloud_type=_first_string(payload, "cloudType", "cloud_type") or fallback_cloud_type,
             gpu_type=gpu_type,
+            template_id=template_id,
+            ports=ports,
+            hourly_price_usd=_first_price_string(payload),
             base_url=self.build_comfyui_base_url(pod_id),
             raw=payload,
         )
@@ -255,11 +282,54 @@ def _unwrap_response_payload(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _extract_pod_items(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ("pods", "data", "items", "results"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = _extract_pod_items(value)
+            if nested:
+                return nested
+    return [data] if _first_string(data, "id", "podId", "pod_id") else []
+
+
 def _first_string(data: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
         value = data.get(key)
         if isinstance(value, str) and value:
             return value
+    return None
+
+
+def _first_price_string(data: dict[str, Any]) -> str | None:
+    for key in (
+        "costPerHr",
+        "costPerHour",
+        "pricePerHour",
+        "hourlyPrice",
+        "dollarsPerHour",
+    ):
+        value = data.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+    for path in (
+        ("machine", "costPerHr"),
+        ("machine", "pricePerHour"),
+        ("gpu", "costPerHr"),
+    ):
+        value: Any = data
+        for key in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
     return None
 
 
@@ -274,6 +344,41 @@ def _nested_first_string(data: dict[str, Any], *paths: tuple[str, ...]) -> str |
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def _extract_ports(data: dict[str, Any]) -> list[str]:
+    values: list[Any] = []
+    for key in ("ports", "runtimePorts", "exposedPorts"):
+        value = data.get(key)
+        if value:
+            values.append(value)
+    runtime = data.get("runtime")
+    if isinstance(runtime, dict):
+        for key in ("ports", "runtimePorts", "exposedPorts"):
+            value = runtime.get(key)
+            if value:
+                values.append(value)
+
+    ports: list[str] = []
+    for value in values:
+        if isinstance(value, str):
+            ports.extend([item.strip() for item in value.split(",") if item.strip()])
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    ports.append(item.strip())
+                elif isinstance(item, dict):
+                    raw_port = (
+                        item.get("port") or item.get("privatePort") or item.get("containerPort")
+                    )
+                    protocol = item.get("protocol") or item.get("type")
+                    if raw_port is not None and protocol:
+                        ports.append(f"{raw_port}/{str(protocol).lower()}")
+        elif isinstance(value, dict):
+            for raw_port, protocol in value.items():
+                if protocol:
+                    ports.append(f"{raw_port}/{str(protocol).lower()}")
+    return sorted(set(ports))
 
 
 def _phase_string(*, primary: str, fallback: str, use_fallback: bool) -> str:
