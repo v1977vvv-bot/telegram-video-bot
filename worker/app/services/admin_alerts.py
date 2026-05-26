@@ -1,37 +1,26 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.models.generation_job import GenerationJob
-from backend.app.models.runpod_pod import RunpodPod
 from shared.app.config import Settings, get_settings
-from shared.app.enums import JobStatus, PodStatus
+from worker.app.services.queue_load_planner import (
+    QueueLoadPlan,
+    calculate_queue_load_plan_for_session,
+)
 
 logger = logging.getLogger(__name__)
 
 _pod_alert_sent_at: dict[UUID, datetime] = {}
 _queue_alert_sent_at: datetime | None = None
 _queue_alert_active = False
-
-
-@dataclass(frozen=True, slots=True)
-class QueueSnapshot:
-    waiting_for_pod: int
-    queued: int
-    generating: int
-    active_pods: int
-    healthy_pods: int
-    idle_healthy_pods: int
-    oldest_wait_minutes: int
-    recommended_pods: int
 
 
 class TelegramAdminAlertService:
@@ -62,7 +51,7 @@ class TelegramAdminAlertService:
         if job is None:
             return False
 
-        snapshot = self._queue_snapshot(session)
+        plan = calculate_queue_load_plan_for_session(session, self._settings)
         text = (
             "⚠️ Нужен RunPod pod\n\n"
             f"Job ID: {job.id}\n"
@@ -71,9 +60,11 @@ class TelegramAdminAlertService:
             f"Format: {job.width}×{job.height}\n"
             f"Price: {_format_usd(job.price_usd)}\n"
             f"Reason: {reason[:180]}\n"
-            f"Waiting jobs: {snapshot.waiting_for_pod}\n"
-            f"Active pods: {snapshot.active_pods}\n"
-            f"Idle healthy pods: {snapshot.idle_healthy_pods}\n\n"
+            f"Waiting jobs: {plan.waiting_for_pod_jobs_count}\n"
+            f"Waiting minutes: {_format_minutes(plan.total_waiting_audio_minutes)}\n"
+            f"Recommended additional pods: {plan.recommended_additional_pods}\n"
+            f"Active pods: {plan.active_pods_count}\n"
+            f"Idle healthy pods: {plan.idle_healthy_pods_count}\n\n"
             "Действие:\n"
             "Создай pod вручную в RunPod UI.\n"
             "Бот сам подхватит его через Sync RunPod pods."
@@ -88,13 +79,8 @@ class TelegramAdminAlertService:
         if not self._enabled():
             return False
 
-        snapshot = self._queue_snapshot(session)
-        pressure = (
-            snapshot.waiting_for_pod >= self._settings.admin_queue_alert_min_waiting_jobs
-            or snapshot.oldest_wait_minutes >= self._settings.admin_queue_alert_target_wait_minutes
-            or (snapshot.waiting_for_pod > 0 and snapshot.idle_healthy_pods == 0)
-        )
-        if not pressure:
+        plan = calculate_queue_load_plan_for_session(session, self._settings)
+        if not plan.should_alert:
             _queue_alert_active = False
             return False
 
@@ -107,20 +93,7 @@ class TelegramAdminAlertService:
             logger.info("Admin queue alert suppressed because repeat is disabled")
             return False
 
-        text = (
-            "⚠️ Очередь генераций растёт\n\n"
-            f"Ожидают pod: {snapshot.waiting_for_pod}\n"
-            f"Queued: {snapshot.queued}\n"
-            f"Generating: {snapshot.generating}\n"
-            f"Активных pod’ов в RunPod: {snapshot.active_pods}\n"
-            f"Healthy ComfyUI pod’ов: {snapshot.healthy_pods}\n"
-            f"Idle healthy pod’ов: {snapshot.idle_healthy_pods}\n"
-            f"Самая старая задача ждёт: {snapshot.oldest_wait_minutes} минут\n"
-            f"Рекомендуется добавить pod’ов: {snapshot.recommended_pods}\n\n"
-            "Действие:\n"
-            "Создай дополнительные pod’ы вручную в RunPod UI.\n"
-            "Бот сам подхватит их через sync."
-        )
+        text = _format_queue_pressure_alert(plan)
         sent = self._send(text)
         if sent:
             _queue_alert_sent_at = now
@@ -131,56 +104,6 @@ class TelegramAdminAlertService:
         if not self._enabled():
             return False
         return self._send(text)
-
-    def _queue_snapshot(self, session: Session) -> QueueSnapshot:
-        waiting_for_pod = _count_jobs(session, JobStatus.WAITING_FOR_POD.value)
-        queued = _count_jobs(session, JobStatus.QUEUED.value)
-        generating = _count_jobs(session, JobStatus.GENERATING.value)
-        active_pods = _count_pods(
-            session,
-            [
-                PodStatus.CREATING.value,
-                PodStatus.STARTING.value,
-                PodStatus.READY.value,
-                PodStatus.IDLE.value,
-                PodStatus.BUSY.value,
-            ],
-        )
-        healthy_pods = _count_pods(
-            session,
-            [PodStatus.READY.value, PodStatus.IDLE.value, PodStatus.BUSY.value],
-            require_healthcheck=True,
-        )
-        idle_healthy_pods = _count_pods(
-            session,
-            [PodStatus.READY.value, PodStatus.IDLE.value],
-            require_healthcheck=True,
-            require_idle=True,
-        )
-        oldest_wait = session.scalar(
-            select(func.min(GenerationJob.waiting_for_pod_since)).where(
-                GenerationJob.status == JobStatus.WAITING_FOR_POD.value,
-                GenerationJob.waiting_for_pod_since.is_not(None),
-            )
-        )
-        oldest_wait_minutes = 0
-        if oldest_wait is not None:
-            oldest_wait_minutes = max(
-                0,
-                int((datetime.now(UTC) - oldest_wait).total_seconds() // 60),
-            )
-        max_pods = max(self._settings.runpod_max_active_pods, 0)
-        recommended_pods = max(0, min(max_pods - active_pods, waiting_for_pod - idle_healthy_pods))
-        return QueueSnapshot(
-            waiting_for_pod=waiting_for_pod,
-            queued=queued,
-            generating=generating,
-            active_pods=active_pods,
-            healthy_pods=healthy_pods,
-            idle_healthy_pods=idle_healthy_pods,
-            oldest_wait_minutes=oldest_wait_minutes,
-            recommended_pods=recommended_pods,
-        )
 
     def _enabled(self) -> bool:
         return (
@@ -197,6 +120,7 @@ class TelegramAdminAlertService:
             "inline_keyboard": [
                 [{"text": "🔄 Sync pods", "callback_data": "admin:sync_pods"}],
                 [{"text": "🚀 Retry waiting", "callback_data": "admin:retry_waiting"}],
+                [{"text": "🖥 Pod’ы", "callback_data": "admin:pods"}],
                 [
                     {
                         "text": "🌐 Web admin",
@@ -223,32 +147,35 @@ class TelegramAdminAlertService:
             return False
 
 
-def _count_jobs(session: Session, status: str) -> int:
-    return int(
-        session.scalar(select(func.count(GenerationJob.id)).where(GenerationJob.status == status))
-        or 0
+def _format_queue_pressure_alert(plan: QueueLoadPlan) -> str:
+    return (
+        "⚠️ Очередь генераций растёт\n\n"
+        f"Ожидают pod: {plan.waiting_for_pod_jobs_count} задач\n"
+        f"Ожидающая длительность: {_format_minutes(plan.total_waiting_audio_minutes)} мин\n"
+        f"Queued: {plan.queued_jobs_count}\n"
+        f"Generating: {plan.generating_jobs_count}\n\n"
+        "RunPod:\n"
+        f"Active pod’ов: {plan.active_pods_count}\n"
+        f"Healthy pod’ов: {plan.healthy_pods_count}\n"
+        f"Idle healthy: {plan.idle_healthy_pods_count}\n"
+        f"Busy: {plan.busy_pods_count}\n\n"
+        "План нагрузки:\n"
+        "Цель: "
+        f"{_format_minutes(plan.target_minutes_per_pod_min)}–"
+        f"{_format_minutes(plan.target_minutes_per_pod_max)} мин очереди на 1 pod\n"
+        "Текущая нагрузка: "
+        f"{_format_minutes(plan.total_waiting_audio_minutes)} мин "
+        f"на {plan.healthy_pods_count} healthy pod’ов\n"
+        f"Рекомендуется добавить: {plan.recommended_additional_pods} pod’ов\n"
+        f"Лимит RUNPOD_MAX_ACTIVE_PODS: {plan.max_active_pods}\n\n"
+        "Действие:\n"
+        "Создай дополнительные pod’ы вручную в RunPod UI.\n"
+        "После запуска нажми 🔄 Sync RunPod pods и 🚀 Retry waiting jobs."
     )
 
 
-def _count_pods(
-    session: Session,
-    statuses: list[str],
-    *,
-    require_healthcheck: bool = False,
-    require_idle: bool = False,
-) -> int:
-    query = select(func.count(RunpodPod.id)).where(
-        RunpodPod.status.in_(statuses),
-        RunpodPod.terminated_at.is_(None),
-    )
-    if require_healthcheck:
-        query = query.where(RunpodPod.last_healthcheck_at.is_not(None))
-    if require_idle:
-        query = query.where(
-            RunpodPod.active_job_id.is_(None),
-            RunpodPod.current_job_id.is_(None),
-        )
-    return int(session.scalar(query) or 0)
+def _format_minutes(value: Decimal) -> str:
+    return str(value.quantize(Decimal("0.1")))
 
 
 def _format_duration(value: Decimal | None) -> str:

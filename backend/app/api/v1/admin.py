@@ -53,6 +53,7 @@ from backend.app.schemas.admin import (
     AdminOverviewRunPod,
     AdminPaymentListItem,
     AdminPaymentsResponse,
+    AdminQueueLoadPlan,
     AdminRunPodCleanupIdleRequest,
     AdminRunPodCleanupIdleResponse,
     AdminRunPodHealthCheckResponse,
@@ -95,6 +96,10 @@ from shared.app.enums import (
 )
 from shared.app.exceptions import AppError
 from worker.app.database import get_worker_session
+from worker.app.services.queue_load_planner import (
+    QueueLoadPlan,
+    calculate_queue_load_plan_for_async_session,
+)
 from worker.app.services.runpod import RunPodError
 from worker.app.services.runpod_costs import RunPodCostService, calculate_gross_margin
 from worker.app.services.runpod_discovery import RunPodDiscoveryResult, RunPodDiscoveryService
@@ -131,6 +136,9 @@ async def get_admin_overview(
         payments=await _overview_payments(session),
         balances=await _overview_balances(session),
         runpod=await _overview_runpod(session),
+        queue_load_plan=_admin_queue_load_plan_item(
+            await calculate_queue_load_plan_for_async_session(session)
+        ),
         business=await _overview_business(session),
         anomalies_count=await _count_anomalies(session),
     )
@@ -190,6 +198,7 @@ async def list_admin_waiting_pod_jobs(
     _: AdminDep,
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> AdminWaitingPodJobsResponse:
+    plan = await calculate_queue_load_plan_for_async_session(session)
     result = await session.execute(
         select(GenerationJob, User)
         .join(User, User.id == GenerationJob.user_id)
@@ -215,7 +224,15 @@ async def list_admin_waiting_pod_jobs(
                 waiting_for_pod_since=job.waiting_for_pod_since,
             )
         )
-    return AdminWaitingPodJobsResponse(items=items, limit=limit)
+    return AdminWaitingPodJobsResponse(
+        items=items,
+        limit=limit,
+        total_waiting_jobs=plan.waiting_for_pod_jobs_count,
+        total_waiting_audio_minutes=plan.total_waiting_audio_minutes,
+        oldest_wait_minutes=plan.oldest_wait_minutes,
+        recommended_additional_pods=plan.recommended_additional_pods,
+        queue_load_plan=_admin_queue_load_plan_item(plan),
+    )
 
 
 @router.get("/payments", response_model=AdminPaymentsResponse)
@@ -245,7 +262,11 @@ async def list_admin_runpod_pods(
     _: AdminDep,
 ) -> AdminRunPodPodsResponse:
     result = await session.execute(select(RunpodPod).order_by(desc(RunpodPod.created_at)))
-    return AdminRunPodPodsResponse(items=[_admin_runpod_pod_item(pod) for pod in result.scalars()])
+    plan = await calculate_queue_load_plan_for_async_session(session)
+    return AdminRunPodPodsResponse(
+        items=[_admin_runpod_pod_item(pod) for pod in result.scalars()],
+        queue_load_plan=_admin_queue_load_plan_item(plan),
+    )
 
 
 @router.post("/runpod/pods/sync", response_model=AdminRunPodSyncResponse)
@@ -1140,6 +1161,10 @@ def _admin_runpod_pod_item(pod: RunpodPod) -> AdminRunPodPodItem:
         estimated_startup_surcharge_usd=_pod_estimated_startup_surcharge(pod),
         estimated_cost_usd=_pod_estimated_cost(pod),
     )
+
+
+def _admin_queue_load_plan_item(plan: QueueLoadPlan) -> AdminQueueLoadPlan:
+    return AdminQueueLoadPlan(**plan.as_dict())
 
 
 async def _admin_business_account_item(

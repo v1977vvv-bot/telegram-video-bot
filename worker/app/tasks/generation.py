@@ -777,6 +777,8 @@ def _retry_waiting_generation_jobs(
         JobStatus.WAITING_FOR_GPU.value,
         JobStatus.WAITING_FOR_POD.value,
     ]
+    if JobStatus.WAITING_FOR_POD.value in waiting_statuses:
+        _send_queue_pressure_alert_if_needed()
     with get_worker_session() as session:
         with session.begin():
             result = session.execute(
@@ -810,6 +812,14 @@ def _retry_waiting_generation_jobs(
         "enqueued": len(job_ids),
         "job_ids": [str(job_id) for job_id in job_ids],
     }
+
+
+def _send_queue_pressure_alert_if_needed() -> None:
+    try:
+        with get_worker_session() as session:
+            TelegramAdminAlertService().send_queue_pressure_alert_if_needed(session)
+    except Exception:
+        logger.warning("Queue pressure alert check failed")
 
 
 def _next_retry_at_for_waiting_status(status: str, settings: Settings, now: datetime) -> datetime:

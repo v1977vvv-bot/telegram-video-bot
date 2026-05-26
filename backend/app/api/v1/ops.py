@@ -234,4 +234,10 @@ def _runpod_config_ops_status(settings) -> dict[str, object]:
         "discovery_interval_seconds": settings.runpod_discovery_interval_seconds,
         "discovery_auto_register": settings.runpod_discovery_auto_register,
         "discovery_require_healthy": settings.runpod_discovery_require_healthy,
+        "queue_load_planning_enabled": settings.runpod_queue_load_planning_enabled,
+        "target_queue_minutes_per_pod_min": settings.runpod_target_queue_minutes_per_pod_min,
+        "target_queue_minutes_per_pod_max": settings.runpod_target_queue_minutes_per_pod_max,
+        "queue_load_alert_min_total_minutes": (settings.runpod_queue_load_alert_min_total_minutes),
+        "queue_load_max_recommended_pods": settings.runpod_queue_load_max_recommended_pods,
+        "queue_load_include_generating": settings.runpod_queue_load_include_generating,
     }

@@ -154,19 +154,41 @@ def _post_sync_keyboard() -> InlineKeyboardMarkup:
 
 def _format_overview(overview: dict[str, Any], pods: dict[str, Any]) -> str:
     jobs = dict(overview.get("jobs") or {})
+    plan = _queue_plan(overview) or _queue_plan(pods)
     pod_items = list(pods.get("items") or [])
-    healthy = sum(1 for pod in pod_items if pod.get("health_status") == "healthy")
-    busy = sum(1 for pod in pod_items if pod.get("status") == "busy")
-    idle = sum(
-        1
-        for pod in pod_items
-        if pod.get("status") in {"idle", "ready"} and pod.get("health_status") == "healthy"
+    healthy = _plan_int(
+        plan,
+        "healthy_pods_count",
+        sum(1 for pod in pod_items if pod.get("health_status") == "healthy"),
     )
-    active = int(dict(overview.get("runpod") or {}).get("active_pods") or 0)
+    busy = _plan_int(
+        plan,
+        "busy_pods_count",
+        sum(1 for pod in pod_items if pod.get("status") == "busy"),
+    )
+    idle = _plan_int(
+        plan,
+        "idle_healthy_pods_count",
+        sum(
+            1
+            for pod in pod_items
+            if pod.get("status") in {"idle", "ready"} and pod.get("health_status") == "healthy"
+        ),
+    )
+    active = _plan_int(
+        plan,
+        "active_pods_count",
+        int(dict(overview.get("runpod") or {}).get("active_pods") or 0),
+    )
+    waiting_minutes = _plan_minutes(plan, "total_waiting_audio_minutes")
+    target_min = _plan_minutes(plan, "target_minutes_per_pod_min", default="5.0")
+    target_max = _plan_minutes(plan, "target_minutes_per_pod_max", default="6.0")
+    recommended = _plan_int(plan, "recommended_additional_pods", 0)
     return (
         "⚙️ Админ-панель\n\n"
         "Очередь:\n"
         f"Ожидают pod: {jobs.get('waiting_for_pod', 0)}\n"
+        f"Ожидающая длительность: {waiting_minutes} мин\n"
         f"Queued: {jobs.get('queued', 0)}\n"
         f"Generating: {jobs.get('generating', 0)}\n"
         f"Failed 24h: {jobs.get('failed_24h', 0)}\n\n"
@@ -174,7 +196,10 @@ def _format_overview(overview: dict[str, Any], pods: dict[str, Any]) -> str:
         f"Активных pod’ов: {active}\n"
         f"Healthy ComfyUI: {healthy}\n"
         f"Busy: {busy}\n"
-        f"Idle: {idle}"
+        f"Idle: {idle}\n\n"
+        "План:\n"
+        f"Цель: {target_min}–{target_max} мин / pod\n"
+        f"Рекомендовано добавить: {recommended} pod’ов"
     )
 
 
@@ -217,9 +242,44 @@ def _format_pods(result: dict[str, Any]) -> str:
 
 def _format_waiting_jobs(result: dict[str, Any]) -> str:
     items = list(result.get("items") or [])
+    plan = _queue_plan(result)
+    total_jobs = _plan_int(
+        plan,
+        "waiting_for_pod_jobs_count",
+        int(result.get("total_waiting_jobs") or len(items)),
+    )
+    total_minutes = _plan_minutes(
+        plan,
+        "total_waiting_audio_minutes",
+        default=str(result.get("total_waiting_audio_minutes") or "0.0"),
+    )
+    oldest_wait = _plan_int(
+        plan,
+        "oldest_wait_minutes",
+        int(result.get("oldest_wait_minutes") or 0),
+    )
+    recommended = _plan_int(
+        plan,
+        "recommended_additional_pods",
+        int(result.get("recommended_additional_pods") or 0),
+    )
     if not items:
-        return "📋 Waiting jobs\n\nНет задач в waiting_for_pod."
-    lines = ["📋 Waiting jobs"]
+        return (
+            "📋 Waiting jobs\n\n"
+            "Нет задач в waiting_for_pod.\n\n"
+            f"Всего waiting: {total_jobs}\n"
+            f"Суммарная длительность: {total_minutes} мин\n"
+            f"Oldest wait: {oldest_wait} мин\n"
+            f"Рекомендовано добавить: {recommended} pod’ов"
+        )
+    lines = [
+        "📋 Waiting jobs",
+        "",
+        f"Всего waiting: {total_jobs}",
+        f"Суммарная длительность: {total_minutes} мин",
+        f"Oldest wait: {oldest_wait} мин",
+        f"Рекомендовано добавить: {recommended} pod’ов",
+    ]
     for job in items[:10]:
         lines.append(
             "\n"
@@ -240,3 +300,31 @@ async def _reply_or_edit(
     if callback.message is None:
         return
     await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+def _queue_plan(data: dict[str, Any]) -> dict[str, Any] | None:
+    plan = data.get("queue_load_plan")
+    return plan if isinstance(plan, dict) else None
+
+
+def _plan_int(plan: dict[str, Any] | None, key: str, default: int) -> int:
+    if not plan:
+        return default
+    try:
+        return int(plan.get(key) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _plan_minutes(
+    plan: dict[str, Any] | None,
+    key: str,
+    *,
+    default: str = "0.0",
+) -> str:
+    if not plan:
+        return default
+    try:
+        return f"{float(plan.get(key) or 0):.1f}"
+    except (TypeError, ValueError):
+        return default

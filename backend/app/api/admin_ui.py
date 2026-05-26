@@ -169,6 +169,36 @@ def _admin_page(page: str) -> HTMLResponse:
         + `<tbody>${{rows}}</tbody></table></div>`;
     }}
 
+    function renderQueueLoadPlan(plan) {{
+      if (!plan) return "";
+      const warning = Number(plan.recommended_additional_pods || 0) > 0
+        ? '<p class="error">Queue load is above target. Add pods before retrying jobs.</p>'
+        : "";
+      return `
+        <h3>Queue load plan</h3>
+        ${{warning}}
+        <table class="kv"><tbody>
+          <tr><th>waiting jobs</th><td>${{escapeHtml(plan.waiting_for_pod_jobs_count)}}</td></tr>
+          <tr>
+            <th>waiting total minutes</th>
+            <td>${{escapeHtml(plan.total_waiting_audio_minutes)}}</td>
+          </tr>
+          <tr><th>healthy pods</th><td>${{escapeHtml(plan.healthy_pods_count)}}</td></tr>
+          <tr><th>idle healthy pods</th><td>${{escapeHtml(plan.idle_healthy_pods_count)}}</td></tr>
+          <tr><th>busy pods</th><td>${{escapeHtml(plan.busy_pods_count)}}</td></tr>
+          <tr>
+            <th>target minutes per pod</th>
+            <td>
+              ${{escapeHtml(plan.target_minutes_per_pod_min)}}–${{escapeHtml(plan.target_minutes_per_pod_max)}}
+            </td>
+          </tr>
+          <tr>
+            <th>recommended additional pods</th>
+            <td>${{escapeHtml(plan.recommended_additional_pods)}}</td>
+          </tr>
+        </tbody></table>`;
+    }}
+
     function formatValue(value) {{
       if (value === null || value === undefined) return "";
       if (Array.isArray(value)) return `${{value.length}} item(s)`;
@@ -177,12 +207,16 @@ def _admin_page(page: str) -> HTMLResponse:
     }}
 
     function render(data) {{
-      if (Array.isArray(data.items)) return renderTable(data.items);
+      if (Array.isArray(data.items)) {{
+        return `${{renderQueueLoadPlan(data.queue_load_plan)}}${{renderTable(data.items)}}`;
+      }}
       if (Array.isArray(data.pods)) return renderTable(data.pods);
-      const rows = flatten(data).map(([key, value]) =>
+      const rows = flatten(data).filter(([key]) => !key.startsWith("queue_load_plan"))
+        .map(([key, value]) =>
         `<tr><th>${{escapeHtml(key)}}</th><td>${{escapeHtml(formatValue(value))}}</td></tr>`
       ).join("");
-      return `<table class="kv"><tbody>${{rows}}</tbody></table>`;
+      return `${{renderQueueLoadPlan(data.queue_load_plan)}}`
+        + `<table class="kv"><tbody>${{rows}}</tbody></table>`;
     }}
 
     function renderActions() {{

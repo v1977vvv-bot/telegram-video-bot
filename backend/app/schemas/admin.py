@@ -51,6 +51,32 @@ class AdminOverviewRunPod(BaseModel):
     estimated_active_cost_usd: Decimal = Decimal("0.0000")
 
 
+class AdminQueueLoadPlan(BaseModel):
+    waiting_for_pod_jobs_count: int = 0
+    queued_jobs_count: int = 0
+    generating_jobs_count: int = 0
+    total_waiting_audio_seconds: Decimal = Decimal("0")
+    total_waiting_audio_minutes: Decimal = Decimal("0")
+    healthy_pods_count: int = 0
+    idle_healthy_pods_count: int = 0
+    busy_pods_count: int = 0
+    active_pods_count: int = 0
+    oldest_wait_minutes: int = 0
+    target_minutes_per_pod_min: Decimal = Decimal("5")
+    target_minutes_per_pod_max: Decimal = Decimal("6")
+    current_capacity_minutes_min: Decimal = Decimal("0")
+    current_capacity_minutes_max: Decimal = Decimal("0")
+    recommended_total_pods: int = 0
+    recommended_additional_pods: int = 0
+    max_active_pods: int = 0
+    alert_min_total_minutes: Decimal = Decimal("5")
+    max_recommended_pods: int = 0
+    include_generating: bool = True
+    planning_enabled: bool = True
+    should_alert: bool = False
+    alert_reason: str | None = None
+
+
 class AdminOverviewBusiness(BaseModel):
     active_accounts: int = 0
     active_members: int = 0
@@ -61,6 +87,7 @@ class AdminOverviewResponse(BaseModel):
     payments: AdminOverviewPayments
     balances: AdminOverviewBalances
     runpod: AdminOverviewRunPod
+    queue_load_plan: AdminQueueLoadPlan
     business: AdminOverviewBusiness
     anomalies_count: int
 
@@ -159,6 +186,7 @@ class AdminRunPodPodItem(BaseModel):
 
 class AdminRunPodPodsResponse(BaseModel):
     items: list[AdminRunPodPodItem]
+    queue_load_plan: AdminQueueLoadPlan | None = None
 
 
 class AdminRunPodSkippedPod(BaseModel):
@@ -211,6 +239,11 @@ class AdminWaitingPodJobItem(BaseModel):
 class AdminWaitingPodJobsResponse(BaseModel):
     items: list[AdminWaitingPodJobItem]
     limit: int
+    total_waiting_jobs: int = 0
+    total_waiting_audio_minutes: Decimal = Decimal("0")
+    oldest_wait_minutes: int = 0
+    recommended_additional_pods: int = 0
+    queue_load_plan: AdminQueueLoadPlan | None = None
 
 
 class AdminBusinessAccountListItem(BaseModel):

@@ -232,6 +232,8 @@ def _require_runpod_cost_config(result: ConfigSanityResult, settings: Settings) 
     errors = _runpod_cost_config_errors(settings)
     for error in errors:
         result.errors.append(error)
+    for error in _runpod_queue_load_config_errors(settings):
+        result.errors.append(error)
 
 
 def _require_comfyui_config(result: ConfigSanityResult, settings: Settings) -> None:
@@ -289,6 +291,8 @@ def _warn_if_runpod_cost_config_invalid(
     settings: Settings,
 ) -> None:
     for error in _runpod_cost_config_errors(settings):
+        result.warnings.append(error)
+    for error in _runpod_queue_load_config_errors(settings):
         result.warnings.append(error)
 
 
@@ -374,6 +378,27 @@ def _runpod_cost_config_errors(settings: Settings) -> list[str]:
             errors.append(f"{name} is invalid: {exc}")
     if settings.runpod_cost_min_billing_seconds < 0:
         errors.append("RUNPOD_COST_MIN_BILLING_SECONDS must be >= 0")
+    return errors
+
+
+def _runpod_queue_load_config_errors(settings: Settings) -> list[str]:
+    errors: list[str] = []
+    if settings.runpod_target_queue_minutes_per_pod_min <= Decimal("0"):
+        errors.append("RUNPOD_TARGET_QUEUE_MINUTES_PER_POD_MIN must be positive")
+    if settings.runpod_target_queue_minutes_per_pod_max <= Decimal("0"):
+        errors.append("RUNPOD_TARGET_QUEUE_MINUTES_PER_POD_MAX must be positive")
+    if (
+        settings.runpod_target_queue_minutes_per_pod_min
+        > settings.runpod_target_queue_minutes_per_pod_max
+    ):
+        errors.append(
+            "RUNPOD_TARGET_QUEUE_MINUTES_PER_POD_MIN must be <= "
+            "RUNPOD_TARGET_QUEUE_MINUTES_PER_POD_MAX"
+        )
+    if settings.runpod_queue_load_alert_min_total_minutes < Decimal("0"):
+        errors.append("RUNPOD_QUEUE_LOAD_ALERT_MIN_TOTAL_MINUTES must be >= 0")
+    if settings.runpod_queue_load_max_recommended_pods < 0:
+        errors.append("RUNPOD_QUEUE_LOAD_MAX_RECOMMENDED_PODS must be >= 0")
     return errors
 
 

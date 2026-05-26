@@ -1625,6 +1625,12 @@ RUNPOD_DISCOVERY_ENABLED=true
 RUNPOD_DISCOVERY_INTERVAL_SECONDS=60
 RUNPOD_DISCOVERY_AUTO_REGISTER=true
 RUNPOD_DISCOVERY_REQUIRE_HEALTHY=true
+RUNPOD_QUEUE_LOAD_PLANNING_ENABLED=true
+RUNPOD_TARGET_QUEUE_MINUTES_PER_POD_MIN=5
+RUNPOD_TARGET_QUEUE_MINUTES_PER_POD_MAX=6
+RUNPOD_QUEUE_LOAD_ALERT_MIN_TOTAL_MINUTES=5
+RUNPOD_QUEUE_LOAD_MAX_RECOMMENDED_PODS=5
+RUNPOD_QUEUE_LOAD_INCLUDE_GENERATING=true
 
 ADMIN_TELEGRAM_IDS=123456789
 ADMIN_BOT_TOKEN=123456789:admin-bot-token
@@ -1675,6 +1681,44 @@ only the web admin Basic Auth/session path works. Bearer access is independent o
 web admin UI flag, so the Telegram admin bot can operate with `ADMIN_PANEL_ENABLED=false`.
 Write actions still require `ADMIN_ACTIONS_ENABLED=true` and are recorded in
 `admin_audit_logs` as `telegram_admin:{telegram_id}` when called from Telegram.
+
+### Queue Load Planning
+
+Queue pressure alerts are based on the total audio duration waiting for a pod, not only
+on job count. The default target is `5–6` minutes of waiting generation per healthy
+RunPod pod. Jobs without `audio_duration_seconds` use
+`RUNPOD_DEFAULT_JOB_DURATION_SECONDS`.
+
+The planner calculates:
+
+```text
+waiting_minutes = sum(waiting_for_pod.audio_duration_seconds) / 60
+queue_pods_needed = ceil(waiting_minutes / RUNPOD_TARGET_QUEUE_MINUTES_PER_POD_MAX)
+busy_pods = active/busy RunPod pods when RUNPOD_QUEUE_LOAD_INCLUDE_GENERATING=true
+recommended_total_pods = busy_pods + queue_pods_needed
+recommended_additional_pods =
+  min(
+    max(0, recommended_total_pods - healthy_pods),
+    RUNPOD_MAX_ACTIVE_PODS - active_pods,
+    RUNPOD_QUEUE_LOAD_MAX_RECOMMENDED_PODS
+  )
+```
+
+An alert is sent when `recommended_additional_pods > 0` and the queue is above
+`RUNPOD_QUEUE_LOAD_ALERT_MIN_TOTAL_MINUTES` or has at least
+`ADMIN_QUEUE_ALERT_MIN_WAITING_JOBS`. It is also sent when the oldest waiting job is
+older than `ADMIN_QUEUE_ALERT_TARGET_WAIT_MINUTES`, even if the load recommendation is
+zero. A small queue with no healthy pods can still show `+1` in the admin panel, but it
+does not alert until the duration/count/oldest-wait rules say it is worth waking an
+operator.
+
+Example: `7.5` minutes waiting, `1` healthy pod, target `5–6` min/pod:
+`ceil(7.5 / 6) = 2`, so the admin bot recommends `+1` pod. With `18` minutes waiting
+and `2` healthy pods, `ceil(18 / 6) = 3`, so it also recommends `+1` pod.
+
+The Telegram admin `/admin` overview, `/admin` `Waiting jobs`, web admin overview, and
+web admin RunPod page all expose the current queue load plan. Queue pressure alerts
+include `Sync pods`, `Retry waiting`, `Pod’ы`, and web admin buttons.
 
 ### Separate Telegram Admin Bot
 
@@ -1746,9 +1790,9 @@ Admin alerts:
   assignable pod, the pool is full, auto-create hit capacity, or all pod healthchecks
   failed.
 - A queue pressure alert is sent when the waiting queue grows, the oldest
-  `waiting_for_pod` job waits past the target, or there are waiting jobs with no healthy
-  idle pods.
-- Alerts include inline buttons for `Sync pods`, `Retry waiting`, and web admin.
+  `waiting_for_pod` job waits past the target, or the total waiting audio duration
+  exceeds the configured per-pod queue load target.
+- Alerts include inline buttons for `Sync pods`, `Retry waiting`, `Pod’ы`, and web admin.
 - Cooldowns prevent repeated identical alerts.
 
 Useful commands:

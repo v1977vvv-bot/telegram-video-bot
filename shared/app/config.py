@@ -180,6 +180,12 @@ class Settings(BaseSettings):
     runpod_queue_wait_enabled: bool = True
     runpod_queue_retry_seconds: int = 60
     runpod_queue_max_wait_minutes: int = 60
+    runpod_queue_load_planning_enabled: bool = True
+    runpod_target_queue_minutes_per_pod_min: Decimal = Field(default=Decimal("5"))
+    runpod_target_queue_minutes_per_pod_max: Decimal = Field(default=Decimal("6"))
+    runpod_queue_load_alert_min_total_minutes: Decimal = Field(default=Decimal("5"))
+    runpod_queue_load_max_recommended_pods: int = 5
+    runpod_queue_load_include_generating: bool = True
     runpod_discovery_enabled: bool = True
     runpod_discovery_interval_seconds: int = 60
     runpod_discovery_auto_register: bool = True
