@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from shared.app.config import get_settings
 from worker.app.celery_app import celery_app
 from worker.app.database import get_worker_session
 from worker.app.services.admin_alerts import TelegramAdminAlertService
@@ -40,6 +41,48 @@ def sync_runpod_pods() -> dict[str, object]:
     logger.info("sync_runpod_pods started")
     payload = _sync_runpod_pods()
     logger.info("sync_runpod_pods completed result=%s", payload)
+    return payload
+
+
+@celery_app.task(name="check_starting_runpod_pods")
+def check_starting_runpod_pods() -> dict[str, object]:
+    logger.info("check_starting_runpod_pods started")
+    settings = get_settings()
+    if not settings.runpod_discovery_starting_healthcheck_enabled:
+        return {"status": "disabled"}
+
+    with get_worker_session() as session:
+        result = RunPodDiscoveryService(settings).check_starting_pods_health(session)
+
+    alert_service = TelegramAdminAlertService(settings)
+    auto_retry = settings.runpod_discovery_auto_retry_waiting_on_healthy
+    for pod in result.ready:
+        alert_service.send_pod_ready_alert(
+            pod_id=pod.pod_id,
+            gpu_type=pod.gpu_type,
+            base_url=pod.base_url,
+            waiting_jobs=pod.waiting_jobs,
+            auto_retry=auto_retry,
+        )
+    for pod in result.failed:
+        alert_service.send_starting_pod_timeout_alert(
+            pod_id=pod.pod_id,
+            gpu_type=pod.gpu_type,
+            base_url=pod.base_url,
+            age_minutes=pod.age_minutes,
+            timeout_minutes=settings.runpod_discovery_starting_healthcheck_timeout_minutes,
+        )
+
+    payload = {"status": "ok", "starting_healthcheck": result.as_dict()}
+    if result.ready and auto_retry:
+        try:
+            retry_waiting_generation_jobs.delay()
+            payload["auto_retry_enqueued"] = True
+        except Exception:
+            logger.warning("RunPod starting healthcheck could not enqueue waiting retry")
+            payload["auto_retry_enqueued"] = False
+
+    logger.info("check_starting_runpod_pods completed result=%s", payload)
     return payload
 
 

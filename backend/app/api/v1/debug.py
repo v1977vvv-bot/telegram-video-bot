@@ -1163,6 +1163,14 @@ async def preview_debug_comfyui_workflow_patch(
 
 
 def _create_runpod_pod_with_fallback(settings) -> dict[str, Any]:
+    if not settings.runpod_auto_create_enabled:
+        logger.info("RunPod auto-create disabled; waiting for manual/discovered pod")
+        raise AppError(
+            "RunPod auto-create is disabled",
+            code="runpod_auto_create_disabled",
+            status_code=403,
+        )
+
     client = RunPodClient(settings)
     try:
         tried_gpu_types: list[DebugRunPodGpuAttemptResponse] = []

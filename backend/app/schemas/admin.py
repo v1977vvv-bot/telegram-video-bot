@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class AdminUserSummary(BaseModel):
@@ -46,8 +46,10 @@ class AdminOverviewBalances(BaseModel):
 
 class AdminOverviewRunPod(BaseModel):
     active_pods: int = 0
+    starting_pods: int = 0
     idle_pods: int = 0
     busy_pods: int = 0
+    auto_create_enabled: bool = True
     estimated_active_cost_usd: Decimal = Decimal("0.0000")
 
 
@@ -173,6 +175,7 @@ class AdminRunPodPodItem(BaseModel):
     health_status: str | None = None
     created_at: datetime
     updated_at: datetime
+    registered_age_minutes: int | None = None
     last_healthcheck_at: datetime | None
     last_heartbeat_at: datetime | None = None
     last_used_at: datetime | None
@@ -187,6 +190,9 @@ class AdminRunPodPodItem(BaseModel):
 class AdminRunPodPodsResponse(BaseModel):
     items: list[AdminRunPodPodItem]
     queue_load_plan: AdminQueueLoadPlan | None = None
+    runpod_auto_create_enabled: bool = True
+    manual_only_mode: bool = False
+    starting_count: int = 0
 
 
 class AdminRunPodSkippedPod(BaseModel):
@@ -202,6 +208,9 @@ class AdminRunPodSyncResponse(BaseModel):
     registered: int
     updated: int
     healthy: int
+    starting: int = 0
+    skipped_count: int = 0
+    starting_healthcheck_interval_seconds: int | None = None
     skipped: list[AdminRunPodSkippedPod]
     audit_log_id: UUID | None = None
 
@@ -248,11 +257,13 @@ class AdminWaitingPodJobsResponse(BaseModel):
 
 class AdminBusinessAccountListItem(BaseModel):
     id: UUID
+    short_id: str
     name: str
     status: str
     available_usd: Decimal
     frozen_usd: Decimal
     active_members_count: int
+    members_count: int
     created_at: datetime
     updated_at: datetime
 
@@ -261,6 +272,38 @@ class AdminBusinessAccountsResponse(BaseModel):
     items: list[AdminBusinessAccountListItem]
     limit: int
     offset: int
+
+
+class BusinessAccountCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    owner_telegram_id: int | None = None
+    owner_user_id: UUID | None = None
+    initial_balance_usd: Decimal | None = Field(default=Decimal("0"), ge=0)
+    reason: str
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Business account name is required")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_owner_identifier(self) -> BusinessAccountCreateRequest:
+        if self.owner_telegram_id is not None and self.owner_user_id is not None:
+            raise ValueError("Use either owner_telegram_id or owner_user_id, not both")
+        return self
+
+
+class BusinessAccountCreateResponse(BaseModel):
+    business_account_id: UUID
+    business_account_name: str
+    owner_user_id: UUID | None = None
+    initial_balance_usd: Decimal
+    audit_log_id: UUID | None = None
+    telegram_notification_sent: bool | None = None
+    warning: str | None = None
 
 
 class AdminBusinessMemberItem(BaseModel):

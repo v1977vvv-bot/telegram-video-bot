@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -51,6 +51,7 @@ class RunPodDiscoveryResult:
     registered: int = 0
     updated: int = 0
     healthy: int = 0
+    starting: int = 0
     skipped: list[RunPodDiscoverySkippedPod] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
@@ -59,7 +60,44 @@ class RunPodDiscoveryResult:
             "registered": self.registered,
             "updated": self.updated,
             "healthy": self.healthy,
+            "starting": self.starting,
             "skipped": [item.as_dict() for item in self.skipped],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RunPodStartingPodEvent:
+    pod_id: str
+    gpu_type: str | None
+    base_url: str | None
+    waiting_jobs: int = 0
+    age_minutes: int | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "pod_id": self.pod_id,
+            "gpu_type": self.gpu_type,
+            "base_url": self.base_url,
+            "waiting_jobs": self.waiting_jobs,
+            "age_minutes": self.age_minutes,
+        }
+
+
+@dataclass(slots=True)
+class RunPodStartingHealthcheckResult:
+    checked: int = 0
+    healthy: int = 0
+    timed_out: int = 0
+    ready: list[RunPodStartingPodEvent] = field(default_factory=list)
+    failed: list[RunPodStartingPodEvent] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "checked": self.checked,
+            "healthy": self.healthy,
+            "timed_out": self.timed_out,
+            "ready": [item.as_dict() for item in self.ready],
+            "failed": [item.as_dict() for item in self.failed],
         }
 
 
@@ -93,7 +131,10 @@ class RunPodDiscoveryService:
                 healthy = self._healthcheck(pod_info.base_url)
                 if healthy:
                     result.healthy += 1
-                elif self._settings.runpod_discovery_require_healthy:
+                elif (
+                    self._settings.runpod_discovery_require_healthy
+                    and not self._should_register_starting_after_healthcheck_failure()
+                ):
                     skip_reason = "comfyui_healthcheck_failed"
 
             if skip_reason is not None:
@@ -116,18 +157,99 @@ class RunPodDiscoveryService:
                 result.registered += 1
             else:
                 result.updated += 1
+            if not healthy:
+                result.starting += 1
 
         self._mark_missing_pods(session, seen_pod_ids)
         session.commit()
         logger.info(
             "RunPod discovery sync completed found=%s registered=%s updated=%s "
-            "healthy=%s skipped=%s",
+            "healthy=%s starting=%s skipped=%s",
             result.found,
             result.registered,
             result.updated,
             result.healthy,
+            result.starting,
             len(result.skipped),
         )
+        return result
+
+    def check_starting_pods_health(self, session: Session) -> RunPodStartingHealthcheckResult:
+        result = RunPodStartingHealthcheckResult()
+        if not self._settings.runpod_discovery_starting_healthcheck_enabled:
+            logger.info("RunPod starting pod healthcheck disabled")
+            return result
+
+        pods = list(
+            session.execute(
+                select(RunpodPod).where(
+                    RunpodPod.status.in_([PodStatus.CREATING.value, PodStatus.STARTING.value]),
+                    RunpodPod.base_url.is_not(None),
+                    RunpodPod.runpod_pod_id.is_not(None),
+                    RunpodPod.terminated_at.is_(None),
+                )
+            ).scalars()
+        )
+        result.checked = len(pods)
+        now = datetime.now(UTC)
+        timeout = timedelta(
+            minutes=max(self._settings.runpod_discovery_starting_healthcheck_timeout_minutes, 1)
+        )
+        waiting_jobs = self._waiting_pod_jobs_count(session)
+
+        for pod in pods:
+            started_at = pod.created_at or pod.last_heartbeat_at or pod.updated_at or now
+            age_minutes = _elapsed_minutes(now, started_at)
+            if self._healthcheck(pod.base_url or ""):
+                result.healthy += 1
+                pod.status = PodStatus.IDLE.value
+                pod.last_healthcheck_at = now
+                pod.last_heartbeat_at = now
+                pod.last_used_at = pod.last_used_at or now
+                pod.active_job_id = None
+                pod.current_job_id = None
+                pod.error_message = None
+                result.ready.append(
+                    RunPodStartingPodEvent(
+                        pod_id=pod.runpod_pod_id,
+                        gpu_type=pod.gpu_type,
+                        base_url=pod.base_url,
+                        waiting_jobs=waiting_jobs,
+                        age_minutes=age_minutes,
+                    )
+                )
+                logger.info("RunPod starting pod became healthy pod_id=%s", pod.runpod_pod_id)
+                continue
+
+            if now - _ensure_aware(started_at) >= timeout:
+                result.timed_out += 1
+                pod.status = PodStatus.FAILED.value
+                pod.active_job_id = None
+                pod.current_job_id = None
+                pod.error_message = (
+                    "ComfyUI healthcheck did not become ready within "
+                    f"{self._settings.runpod_discovery_starting_healthcheck_timeout_minutes} "
+                    "minutes"
+                )
+                result.failed.append(
+                    RunPodStartingPodEvent(
+                        pod_id=pod.runpod_pod_id,
+                        gpu_type=pod.gpu_type,
+                        base_url=pod.base_url,
+                        waiting_jobs=waiting_jobs,
+                        age_minutes=age_minutes,
+                    )
+                )
+                logger.warning(
+                    "RunPod starting pod healthcheck timed out pod_id=%s age_minutes=%s",
+                    pod.runpod_pod_id,
+                    age_minutes,
+                )
+            else:
+                pod.last_heartbeat_at = now
+                pod.error_message = "Discovered pod is not healthy yet"
+
+        session.commit()
         return result
 
     def check_registered_pods_health(self, session: Session) -> RunPodDiscoveryResult:
@@ -195,6 +317,12 @@ class RunPodDiscoveryService:
         if pod_info.ports and expected_port.lower() not in discovered_ports:
             return "comfyui_port_missing"
         return None
+
+    def _should_register_starting_after_healthcheck_failure(self) -> bool:
+        return bool(
+            self._settings.runpod_discovery_auto_register
+            and self._settings.runpod_discovery_register_starting
+        )
 
     def _register_or_update_pod(
         self,
@@ -300,6 +428,19 @@ class RunPodDiscoveryService:
             gpu_type=pod_info.gpu_type,
         )
 
+    def _waiting_pod_jobs_count(self, session: Session) -> int:
+        from sqlalchemy import func
+
+        from backend.app.models.generation_job import GenerationJob
+        from shared.app.enums import JobStatus
+
+        count = session.scalar(
+            select(func.count(GenerationJob.id)).where(
+                GenerationJob.status == JobStatus.WAITING_FOR_POD.value
+            )
+        )
+        return int(count or 0)
+
     def _healthcheck(self, base_url: str) -> bool:
         if not base_url:
             return False
@@ -315,3 +456,16 @@ class RunPodDiscoveryService:
         except Exception:
             logger.info("RunPod discovery ComfyUI healthcheck failed base_url=%s", base_url)
             return False
+
+
+def _ensure_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def _elapsed_minutes(now: datetime, since: datetime | None) -> int:
+    if since is None:
+        return 0
+    aware_since = _ensure_aware(since)
+    return max(0, int((now - aware_since).total_seconds() // 60))

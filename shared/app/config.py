@@ -137,6 +137,7 @@ class Settings(BaseSettings):
     runpod_pod_idle_shutdown_minutes: int = 20
     runpod_pod_ready_timeout_seconds: int = 7200
     runpod_healthcheck_interval_seconds: int = 15
+    runpod_auto_create_enabled: bool = True
     runpod_auto_terminate: bool = True
     runpod_keeper_enabled: bool = True
     runpod_keeper_interval_seconds: int = 120
@@ -190,6 +191,11 @@ class Settings(BaseSettings):
     runpod_discovery_interval_seconds: int = 60
     runpod_discovery_auto_register: bool = True
     runpod_discovery_require_healthy: bool = True
+    runpod_discovery_register_starting: bool = True
+    runpod_discovery_starting_healthcheck_enabled: bool = True
+    runpod_discovery_starting_healthcheck_interval_seconds: int = 30
+    runpod_discovery_starting_healthcheck_timeout_minutes: int = 120
+    runpod_discovery_auto_retry_waiting_on_healthy: bool = True
 
     distributed_segment_generation_enabled: bool = False
     distributed_min_audio_duration_seconds: int = 60

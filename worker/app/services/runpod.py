@@ -78,6 +78,10 @@ class RunPodClient:
         cloud_type: str | None = None,
         cloud_phase: str | None = None,
     ) -> RunPodPodInfo:
+        if not self._settings.runpod_auto_create_enabled:
+            logger.info("RunPod auto-create disabled; waiting for manual/discovered pod")
+            raise RunPodCapacityError("RunPod auto-create disabled")
+
         resolved_min_ram_gb = min_ram_gb or self._settings.runpod_min_ram_gb
         resolved_cloud_type = cloud_type or self._settings.runpod_primary_cloud_type
         payload = self.build_create_pod_payload(

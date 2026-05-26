@@ -105,6 +105,53 @@ class TelegramAdminAlertService:
             return False
         return self._send(text)
 
+    def send_pod_ready_alert(
+        self,
+        *,
+        pod_id: str,
+        gpu_type: str | None,
+        base_url: str | None,
+        waiting_jobs: int,
+        auto_retry: bool,
+    ) -> bool:
+        if not self._enabled():
+            return False
+        retry_text = (
+            "Waiting jobs automatically retried."
+            if auto_retry
+            else "Нажми 🚀 Retry waiting jobs, чтобы забрать очередь."
+        )
+        return self._send(
+            "✅ RunPod pod готов\n\n"
+            f"Pod ID: {pod_id}\n"
+            f"GPU: {gpu_type or 'unknown'}\n"
+            f"ComfyUI: {base_url or 'unknown'}\n"
+            f"Waiting jobs: {waiting_jobs}\n"
+            f"Auto retry: {'enabled' if auto_retry else 'disabled'}\n\n"
+            f"{retry_text}"
+        )
+
+    def send_starting_pod_timeout_alert(
+        self,
+        *,
+        pod_id: str,
+        gpu_type: str | None,
+        base_url: str | None,
+        age_minutes: int | None,
+        timeout_minutes: int,
+    ) -> bool:
+        if not self._enabled():
+            return False
+        return self._send(
+            "⚠️ Pod не стал healthy за "
+            f"{timeout_minutes} минут\n\n"
+            f"Pod ID: {pod_id}\n"
+            f"GPU: {gpu_type or 'unknown'}\n"
+            f"ComfyUI: {base_url or 'unknown'}\n"
+            f"Age: {age_minutes if age_minutes is not None else 'unknown'} мин\n\n"
+            "Проверь RunPod UI, template logs и доступность /system_stats."
+        )
+
     def _enabled(self) -> bool:
         return (
             self._settings.admin_alerts_enabled

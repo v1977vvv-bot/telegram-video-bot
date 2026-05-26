@@ -30,6 +30,11 @@ from worker.app.services.runpod_discovery import RunPodDiscoveryService
 
 logger = logging.getLogger(__name__)
 
+ASSIGNABLE_POD_STATUSES = {
+    PodStatus.READY.value,
+    PodStatus.IDLE.value,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ManagedComfyUIEndpoint:
@@ -116,6 +121,12 @@ class RunPodManager:
 
         if self._should_wait_instead_of_cold_start(session, job_id, cold_or_busy_count):
             raise RunPodPoolFullError("short_job_wait_existing_capacity")
+
+        if not self._settings.runpod_auto_create_enabled:
+            logger.info("RunPod auto-create disabled; waiting for manual/discovered pod")
+            raise RunPodPoolFullError(
+                "RunPod auto-create disabled; waiting for manual/discovered pod"
+            )
 
         logger.info(
             "RunPod creating additional pod active_count=%s max_active_pods=%s",
@@ -324,6 +335,12 @@ class RunPodManager:
         return Decimal(duration)
 
     def _create_and_wait_for_pod(self, session: Session, *, job_id: UUID | None) -> RunpodPod:
+        if not self._settings.runpod_auto_create_enabled:
+            logger.info("RunPod auto-create disabled; waiting for manual/discovered pod")
+            raise RunPodPoolFullError(
+                "RunPod auto-create disabled; waiting for manual/discovered pod"
+            )
+
         last_error: Exception | None = None
         sleep_seconds = max(self._settings.runpod_create_retry_sleep_seconds, 0)
 
@@ -577,13 +594,7 @@ class RunPodManager:
             if refreshed is None:
                 raise RunPodError(f"RunPod pod record disappeared pod_id={pod.runpod_pod_id}")
             if (
-                refreshed.status
-                not in {
-                    PodStatus.CREATING.value,
-                    PodStatus.STARTING.value,
-                    PodStatus.READY.value,
-                    PodStatus.IDLE.value,
-                }
+                refreshed.status not in ASSIGNABLE_POD_STATUSES
                 or refreshed.terminated_at is not None
                 or refreshed.active_job_id is not None
                 or refreshed.current_job_id is not None

@@ -195,13 +195,22 @@ MVP rules:
 - Business members spend from the shared business balance automatically.
 - There is no automatic fallback to personal balance when business balance is
   insufficient, to avoid unexpected personal charges.
-- Business top-up is manual through protected local debug/admin endpoints and can
+- Business top-up is manual through protected admin endpoints and can
   represent direct payment to support.
 - Generation funds are held before generation and captured only after successful
   output upload. Failed or cancelled business jobs refund the held amount back to the
   business balance.
-- The future admin panel will expose this UI; Stage 10.3 only adds local protected
-  endpoints.
+- Web admin exposes account creation, manual top-up, and member management behind
+  `ADMIN_ACTIONS_ENABLED=true`.
+
+Business Accounts admin flow:
+
+1. Open `/admin/business` and create a business account, for example `FireTraff`.
+2. Optionally set the owner by Telegram ID or internal User UUID during creation.
+3. Add additional owners/members from the same page.
+4. Top up the business balance.
+5. User generation jobs are charged from business balance when the user has an active
+   membership in an active business account.
 
 Debug/admin commands:
 
@@ -299,6 +308,7 @@ through existing protected local debug endpoints until Stage 11.2.
 Stage 11.2 adds protected operator actions behind `ADMIN_ACTIONS_ENABLED=true`:
 
 - manual personal balance top-up
+- create business accounts
 - manual business balance top-up
 - add/deactivate business account members
 - fail/refund a generation job through the existing safe refund path
@@ -556,6 +566,7 @@ RUNPOD_FALLBACK_GLOBAL_NETWORK=
 RUNPOD_POD_IDLE_SHUTDOWN_MINUTES=20
 RUNPOD_POD_READY_TIMEOUT_SECONDS=7200
 RUNPOD_HEALTHCHECK_INTERVAL_SECONDS=15
+RUNPOD_AUTO_CREATE_ENABLED=true
 RUNPOD_AUTO_TERMINATE=true
 RUNPOD_KEEPER_ENABLED=true
 RUNPOD_KEEPER_INTERVAL_SECONDS=120
@@ -615,10 +626,13 @@ DISTRIBUTED_SEGMENT_IMAGE_STRATEGY=source_image
 
 How it works:
 
-- Worker first looks for a DB pod record with status `starting`, `creating`, `ready`,
-  or `idle`.
-- If the pod passes ComfyUI `/system_stats`, it is marked `busy` and reused.
-- If no ready pod exists, the worker creates a pod from `RUNPOD_TEMPLATE_ID`.
+- Worker first looks for an idle/ready DB pod record with a healthy ComfyUI
+  `/system_stats`.
+- Discovered `starting`/`creating` pods count as active capacity, but they are not
+  assignable until the starting healthcheck marks them `idle`.
+- If no ready pod exists and `RUNPOD_AUTO_CREATE_ENABLED=true`, the worker creates a
+  pod from `RUNPOD_TEMPLATE_ID`. When `RUNPOD_AUTO_CREATE_ENABLED=false`, the job stays
+  in `waiting_for_pod` until a manually discovered pod becomes healthy.
 - The create policy first exhausts Secure Cloud using `RUNPOD_PRIMARY_CLOUD_TYPE`,
   `RUNPOD_ALLOWED_GPU_TYPES`, and `RUNPOD_PRIMARY_CREATE_MAX_ATTEMPTS`. If Secure
   Cloud has no capacity, it falls back to `RUNPOD_FALLBACK_CLOUD_TYPE` with
@@ -758,17 +772,22 @@ The RunPod image startup log lists available WanVideo and InfiniteTalk model fil
   schedules `retry_waiting_for_gpu_jobs` after `RUNPOD_WAITING_GPU_RETRY_SECONDS`.
   If the job waits longer than `RUNPOD_WAITING_GPU_MAX_WAIT_MINUTES`, the next capacity
   failure marks it failed and refunds the frozen balance.
-- Stage 8.2 adds the RunPod keeper. `runpod_keeper_tick` healthchecks managed pods,
-  marks healthy `starting`/`ready` pods as `idle`, terminates idle pods after
-  `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES`, and can keep warm pods ready when queued,
+- Stage 8.2 adds the RunPod keeper. `runpod_keeper_tick` healthchecks ready/idle
+  managed pods, terminates idle pods after `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES`, and
+  can keep warm pods ready when queued,
   `waiting_for_gpu`, or `waiting_for_pod` jobs exist. It never terminates `busy` pods or pods with an
   `active_job_id`, and it never changes balances.
+- `check_starting_runpod_pods` handles discovered `starting` pods. It waits for
+  ComfyUI `/system_stats`, marks healthy pods `idle`, sends the admin ready alert, and
+  can enqueue `retry_waiting_generation_jobs`.
 - Warm pods reduce the first-job latency but cost money while idle. Use
-  `RUNPOD_WARM_POD_ENABLED=false` to disable proactive pod creation, or lower
+  `RUNPOD_WARM_POD_ENABLED=false` to disable proactive warm-pod creation. Use
+  `RUNPOD_AUTO_CREATE_ENABLED=false` to block all create pod API calls, or lower
   `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES` to reduce idle cost.
 - Stage 8.3 allows `RUNPOD_MAX_ACTIVE_PODS > 1`. Each pod runs one job at a time.
   The worker reuses a healthy idle pod first; if all pods are busy and active pod count
-  is still below `RUNPOD_MAX_ACTIVE_PODS`, it creates another pod. If the pool is full,
+  is still below `RUNPOD_MAX_ACTIVE_PODS`, it creates another pod only when
+  `RUNPOD_AUTO_CREATE_ENABLED=true`. If the pool is full or auto-create is disabled,
   the job moves to `waiting_for_pod`, keeps the balance frozen, and retries after
   `RUNPOD_QUEUE_RETRY_SECONDS`. If it waits longer than
   `RUNPOD_QUEUE_MAX_WAIT_MINUTES`, the job fails and refunds.
@@ -818,9 +837,9 @@ curl -X POST http://localhost:8000/api/v1/debug/generation/retry-waiting-gpu
 curl -X POST http://localhost:8000/api/v1/debug/generation/retry-waiting
 ```
 
-There is no Celery beat scheduler in the MVP compose setup. In production, schedule the
-Celery task `runpod_keeper_tick` every `RUNPOD_KEEPER_INTERVAL_SECONDS` seconds with
-cron, Cloud Scheduler, or Celery beat. The HTTP endpoint is local/debug-only and is meant
+Production compose includes a separate `worker_beat` service. It schedules
+`runpod_keeper_tick`, RunPod discovery, and `check_starting_runpod_pods`; keep it
+running alongside `worker` in manual-only mode. The local debug HTTP endpoints are still
 for manual checks, not as the production scheduler surface.
 
 ## RunPod cost tracking
@@ -1463,7 +1482,8 @@ Rollback:
 Emergency controls:
 
 - Stop new processing by stopping the worker: `docker compose stop worker`.
-- Prevent new pods by setting `RUNPOD_MAX_ACTIVE_PODS=0` and restarting the worker.
+- Prevent new pod creation by setting `RUNPOD_AUTO_CREATE_ENABLED=false` and
+  restarting the worker. Existing discovered pods can still be used and cleaned up.
 - Terminate active RunPod pods through the local debug endpoint or RunPod dashboard.
 - Use `fail-refund` for stuck queued/generating/waiting jobs after verifying they did
   not already capture balance.
@@ -1625,6 +1645,11 @@ RUNPOD_DISCOVERY_ENABLED=true
 RUNPOD_DISCOVERY_INTERVAL_SECONDS=60
 RUNPOD_DISCOVERY_AUTO_REGISTER=true
 RUNPOD_DISCOVERY_REQUIRE_HEALTHY=true
+RUNPOD_DISCOVERY_REGISTER_STARTING=true
+RUNPOD_DISCOVERY_STARTING_HEALTHCHECK_ENABLED=true
+RUNPOD_DISCOVERY_STARTING_HEALTHCHECK_INTERVAL_SECONDS=30
+RUNPOD_DISCOVERY_STARTING_HEALTHCHECK_TIMEOUT_MINUTES=120
+RUNPOD_DISCOVERY_AUTO_RETRY_WAITING_ON_HEALTHY=true
 RUNPOD_QUEUE_LOAD_PLANNING_ENABLED=true
 RUNPOD_TARGET_QUEUE_MINUTES_PER_POD_MIN=5
 RUNPOD_TARGET_QUEUE_MINUTES_PER_POD_MAX=6
@@ -1662,10 +1687,15 @@ Manual RunPod UI flow:
 2. Use the same ComfyUI HTTP port as `RUNPOD_COMFYUI_PORT` (`8188` by default).
 3. Select a GPU type that is present in `RUNPOD_ALLOWED_GPU_TYPES` or
    `RUNPOD_FALLBACK_ALLOWED_GPU_TYPES`.
-4. Wait until ComfyUI is reachable at
+4. You can immediately sync it before ComfyUI is reachable at
    `https://{pod_id}-{RUNPOD_COMFYUI_PORT}.proxy.runpod.net/system_stats`.
-5. In web admin, open `/admin/runpod` and click `Sync from RunPod`.
-6. Click `Retry waiting jobs` so `waiting_for_pod` jobs are queued again.
+5. In web admin, open `/admin/runpod` and click `Sync from RunPod`, or use
+   `🔄 Sync RunPod pods` in the Telegram admin bot.
+6. If `/system_stats` is not ready yet, the backend registers the pod as `starting`
+   and checks it every `RUNPOD_DISCOVERY_STARTING_HEALTHCHECK_INTERVAL_SECONDS`.
+7. When the pod becomes healthy, it is marked `idle` and
+   `waiting_for_pod` jobs are retried automatically when
+   `RUNPOD_DISCOVERY_AUTO_RETRY_WAITING_ON_HEALTHY=true`.
 
 The same flow is available from Telegram for operators listed in `ADMIN_TELEGRAM_IDS`:
 
@@ -1674,6 +1704,38 @@ The same flow is available from Telegram for operators listed in `ADMIN_TELEGRAM
 🔄 Sync RunPod pods
 🚀 Retry waiting jobs
 ```
+
+### Manual-only RunPod mode
+
+Use manual-only mode when operators should create pods in RunPod UI and the worker must
+never call the RunPod create pod API. This does not disable discovery, sync, retry
+waiting jobs, queue load planning, admin alerts, or cleanup of idle pods.
+
+```env
+RUNPOD_AUTO_CREATE_ENABLED=false
+RUNPOD_DISCOVERY_ENABLED=true
+RUNPOD_DISCOVERY_AUTO_REGISTER=true
+RUNPOD_DISCOVERY_REGISTER_STARTING=true
+RUNPOD_DISCOVERY_STARTING_HEALTHCHECK_ENABLED=true
+RUNPOD_DISCOVERY_AUTO_RETRY_WAITING_ON_HEALTHY=true
+RUNPOD_AUTO_TERMINATE=true
+RUNPOD_POD_IDLE_SHUTDOWN_MINUTES=20
+```
+
+Flow:
+
+1. Admin creates a pod manually in RunPod UI.
+2. Admin can immediately press `Sync RunPod pods`; waiting for `/system_stats` is not
+   required.
+3. Backend registers matching pods as `starting` when ComfyUI is still booting.
+4. `check_starting_runpod_pods` checks `/system_stats` every configured interval.
+5. Once healthy, the pod becomes `idle`, the admin bot sends `✅ RunPod pod готов`,
+   and waiting jobs are retried automatically when auto-retry is enabled.
+6. Idle pods are still deleted after `RUNPOD_POD_IDLE_SHUTDOWN_MINUTES` when cleanup is
+   enabled.
+
+`RUNPOD_AUTO_CREATE_ENABLED=false` only blocks create pod API calls. It does not block
+RunPod list/delete APIs, so manual sync and idle cleanup continue to work.
 
 Telegram admin actions call the backend with `Authorization: Bearer
 <ADMIN_INTERNAL_API_TOKEN>`. If the token is empty, bearer admin access is disabled and
@@ -1739,7 +1801,8 @@ Setup:
 6. Set `ADMIN_ACTIONS_ENABLED=true` if Telegram buttons must run write actions such
    as `Sync RunPod pods`, `Check pod health`, `Cleanup idle pods`, or
    `Retry waiting jobs`.
-7. Deploy the `admin_bot` compose service.
+7. Deploy the `admin_bot` compose service and keep `worker_beat` running for periodic
+   RunPod discovery/starting healthchecks.
 
 Minimum production env for the separate admin bot:
 
@@ -1763,9 +1826,10 @@ with any token.
 Production compose includes a separate service:
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build backend bot worker admin_bot
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build backend bot worker worker_beat admin_bot
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build admin_bot
 docker compose -f docker-compose.prod.yml --env-file .env.production logs -f admin_bot
+docker compose -f docker-compose.prod.yml --env-file .env.production logs -f worker_beat
 ```
 
 If `ADMIN_BOT_TOKEN` is set, the main `bot` service does not register `/admin`.
@@ -1774,12 +1838,13 @@ alerts fall back to `TELEGRAM_BOT_TOKEN`.
 
 Admin bot smoke test:
 
-1. Start `backend`, `bot`, `worker`, and `admin_bot`.
+1. Start `backend`, `bot`, `worker`, `worker_beat`, and `admin_bot`.
 2. Send `/admin` to the admin bot from a Telegram id listed in `ADMIN_TELEGRAM_IDS`.
 3. Confirm the menu shows `Sync RunPod pods`, `Check pod health`, `Retry waiting jobs`,
    `Waiting jobs`, `Pod’ы`, `Cleanup idle pods`, and `Web admin`.
-4. Press `Sync RunPod pods`; the response should show found/registered/updated/healthy
-   counts.
+4. Press `Sync RunPod pods`; the response should show found/healthy/starting/skipped
+   counts. If a pod is still booting, it should say that ComfyUI will be checked every
+   configured interval.
 5. Press `Retry waiting jobs`; eligible `waiting_for_pod` jobs should be enqueued.
 6. Send `/admin` to the main user bot. With `ADMIN_BOT_TOKEN` configured it should not
    expose the admin menu.

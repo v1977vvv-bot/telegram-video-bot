@@ -29,8 +29,6 @@ ACTIVE_POD_STATUSES = {
     PodStatus.BUSY.value,
 }
 HEALTHCHECK_POD_STATUSES = {
-    PodStatus.CREATING.value,
-    PodStatus.STARTING.value,
     PodStatus.READY.value,
     PodStatus.IDLE.value,
 }
@@ -131,6 +129,9 @@ class RunPodKeeper:
 
         created_warm_pods: list[str] = []
         create_limit = decision.pods_to_create if self._settings.runpod_warm_pod_enabled else 0
+        if create_limit > 0 and not self._settings.runpod_auto_create_enabled:
+            logger.info("RunPod auto-create disabled; waiting for manual/discovered pod")
+            create_limit = 0
         while len(created_warm_pods) < create_limit:
             try:
                 created_warm_pods.append(self._create_warm_pod())
@@ -224,6 +225,10 @@ class RunPodKeeper:
         return terminated
 
     def _create_warm_pod(self) -> str:
+        if not self._settings.runpod_auto_create_enabled:
+            logger.info("RunPod auto-create disabled; waiting for manual/discovered pod")
+            raise RunPodError("RunPod auto-create disabled")
+
         logger.info("RunPod keeper creating warm pod")
         with get_worker_session() as session:
             pod = self._manager._create_and_wait_for_pod(session, job_id=None)  # noqa: SLF001

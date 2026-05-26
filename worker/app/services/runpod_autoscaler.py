@@ -147,6 +147,10 @@ class RunPodAutoscaler:
             logger.info("RunPod autoscaler cooldown active, skip scale up")
             reason_parts.append("scale_up_cooldown_active")
             pods_to_create = 0
+        if pods_to_create > 0 and not self._settings.runpod_auto_create_enabled:
+            logger.info("RunPod auto-create disabled; waiting for manual/discovered pod")
+            reason_parts.append("auto_create_disabled")
+            pods_to_create = 0
 
         pods_to_terminate = min(
             max(active_pods - desired, 0),
@@ -208,6 +212,9 @@ class RunPodAutoscaler:
         desired = max(min_warm_pods, min(max_active_pods, pending_jobs_count))
         desired = max(desired, busy_pods)
         pods_to_create = min(max(desired - active_pods, 0), max(max_active_pods - active_pods, 0))
+        if pods_to_create > 0 and not self._settings.runpod_auto_create_enabled:
+            logger.info("RunPod auto-create disabled; waiting for manual/discovered pod")
+            pods_to_create = 0
         pods_to_terminate = min(
             max(active_pods - desired, 0),
             self._eligible_idle_termination_count(),
@@ -218,6 +225,8 @@ class RunPodAutoscaler:
             if not self._settings.runpod_autoscaling_enabled
             else f"unknown_strategy_{strategy}_stage83"
         )
+        if not self._settings.runpod_auto_create_enabled:
+            reason = f"{reason} auto_create_disabled"
         return RunPodAutoscalingDecision(
             enabled=enabled,
             strategy=strategy,

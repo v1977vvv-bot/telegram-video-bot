@@ -134,6 +134,7 @@ def _admin_page(page: str) -> HTMLResponse:
     const actions = document.getElementById("actions");
     const actionStatus = document.getElementById("action-status");
     const refresh = document.getElementById("refresh");
+    let businessAccounts = [];
 
     function escapeHtml(value) {{
       return String(value ?? "")
@@ -199,6 +200,46 @@ def _admin_page(page: str) -> HTMLResponse:
         </tbody></table>`;
     }}
 
+    function renderRunPodSummary(data) {{
+      if (page !== "runpod") return "";
+      const manualOnly = Boolean(data.manual_only_mode);
+      const hint = manualOnly
+        ? '<p class="error">Manual-only mode is enabled. '
+          + 'Sync manually created RunPod pods before retrying jobs.</p>'
+        : "";
+      return `
+        <h3>RunPod mode</h3>
+        ${{hint}}
+        <table class="kv"><tbody>
+          <tr>
+            <th>auto-create enabled</th>
+            <td>${{escapeHtml(data.runpod_auto_create_enabled)}}</td>
+          </tr>
+          <tr><th>starting pods</th><td>${{escapeHtml(data.starting_count)}}</td></tr>
+          <tr><th>manual-only mode</th><td>${{escapeHtml(manualOnly)}}</td></tr>
+        </tbody></table>`;
+    }}
+
+    function formatMoney(value) {{
+      const numberValue = Number(value || 0);
+      return Number.isFinite(numberValue) ? numberValue.toFixed(2) : String(value ?? "0");
+    }}
+
+    function businessAccountOptionLabel(account) {{
+      return `${{account.name || "Unnamed"}} — $${{formatMoney(account.available_usd)}}`
+        + ` available — ${{account.status || "unknown"}}`;
+    }}
+
+    function businessAccountOptions() {{
+      if (!businessAccounts.length) {{
+        return '<option value="">No business accounts yet. Create one first.</option>';
+      }}
+      return businessAccounts.map(account =>
+        `<option value="${{escapeHtml(account.id)}}">`
+        + `${{escapeHtml(businessAccountOptionLabel(account))}}</option>`
+      ).join("");
+    }}
+
     function formatValue(value) {{
       if (value === null || value === undefined) return "";
       if (Array.isArray(value)) return `${{value.length}} item(s)`;
@@ -208,7 +249,8 @@ def _admin_page(page: str) -> HTMLResponse:
 
     function render(data) {{
       if (Array.isArray(data.items)) {{
-        return `${{renderQueueLoadPlan(data.queue_load_plan)}}${{renderTable(data.items)}}`;
+        return `${{renderRunPodSummary(data)}}`
+          + `${{renderQueueLoadPlan(data.queue_load_plan)}}${{renderTable(data.items)}}`;
       }}
       if (Array.isArray(data.pods)) return renderTable(data.pods);
       const rows = flatten(data).filter(([key]) => !key.startsWith("queue_load_plan"))
@@ -261,6 +303,13 @@ def _admin_page(page: str) -> HTMLResponse:
         actions.innerHTML = '<p class="muted">Admin actions are disabled.</p>';
         return;
       }}
+      const accountSelect = `
+        <select name="business_account_id" required>
+          ${{businessAccountOptions()}}
+        </select>`;
+      const noBusinessAccounts = !businessAccounts.length && page === "business"
+        ? '<p class="muted">No business accounts yet. Create one first.</p>'
+        : "";
       const forms = {{
         overview: `
           <h3>Queue controls</h3>
@@ -328,15 +377,25 @@ def _admin_page(page: str) -> HTMLResponse:
             <button type="submit">Terminate pod</button>
           </form>`,
         business: `
+          ${{noBusinessAccounts}}
+          <h3>Create business account</h3>
+          <form class="action-form" data-action="business_create">
+            <input name="name" placeholder="FireTraff" required>
+            <input name="owner_telegram_id" placeholder="Owner Telegram ID">
+            <input name="owner_user_id" placeholder="Owner User UUID">
+            <input name="initial_balance_usd" placeholder="Initial balance USD" value="0">
+            <input name="reason" placeholder="Reason" required>
+            <button type="submit">Create business account</button>
+          </form>
           <h3>Business controls</h3>
           <form class="action-form" data-action="business_topup">
-            <input name="business_account_id" placeholder="Business account UUID" required>
+            ${{accountSelect}}
             <input name="amount_usd" placeholder="Amount USD" required>
             <input name="reason" placeholder="Reason" required>
             <button type="submit">Top up business balance</button>
           </form>
           <form class="action-form" data-action="business_add_member">
-            <input name="business_account_id" placeholder="Business account UUID" required>
+            ${{accountSelect}}
             <input name="telegram_id" placeholder="Telegram ID">
             <input name="user_id" placeholder="User UUID">
             <select name="role">
@@ -347,7 +406,7 @@ def _admin_page(page: str) -> HTMLResponse:
             <button type="submit">Add member</button>
           </form>
           <form class="action-form" data-action="business_remove_member">
-            <input name="business_account_id" placeholder="Business account UUID" required>
+            ${{accountSelect}}
             <input name="user_id" placeholder="User UUID" required>
             <input name="reason" placeholder="Reason" required>
             <button type="submit">Deactivate member</button>
@@ -414,15 +473,35 @@ def _admin_page(page: str) -> HTMLResponse:
         path = `/api/v1/admin/payments/${{data.payment_id}}/recheck`;
       }} else if (form.dataset.action === "terminate_pod") {{
         path = `/api/v1/admin/runpod/pods/${{data.runpod_pod_id}}/terminate`;
+      }} else if (form.dataset.action === "business_create") {{
+        path = "/api/v1/admin/business-accounts";
+        body.name = data.name;
+        body.owner_telegram_id = data.owner_telegram_id
+          ? Number(data.owner_telegram_id)
+          : undefined;
+        body.owner_user_id = data.owner_user_id;
+        body.initial_balance_usd = data.initial_balance_usd || "0";
       }} else if (form.dataset.action === "business_topup") {{
+        if (!data.business_account_id) {{
+          actionStatus.textContent = "Error: Create/select a business account first";
+          return;
+        }}
         path = `/api/v1/admin/business-accounts/${{data.business_account_id}}/balance/top-up`;
         body.amount_usd = data.amount_usd;
       }} else if (form.dataset.action === "business_add_member") {{
+        if (!data.business_account_id) {{
+          actionStatus.textContent = "Error: Create/select a business account first";
+          return;
+        }}
         path = `/api/v1/admin/business-accounts/${{data.business_account_id}}/members`;
         body.telegram_id = data.telegram_id ? Number(data.telegram_id) : undefined;
         body.user_id = data.user_id;
         body.role = data.role || "member";
       }} else if (form.dataset.action === "business_remove_member") {{
+        if (!data.business_account_id) {{
+          actionStatus.textContent = "Error: Create/select a business account first";
+          return;
+        }}
         path = `/api/v1/admin/business-accounts/${{data.business_account_id}}`
           + `/members/${{data.user_id}}/deactivate`;
       }}
@@ -438,7 +517,12 @@ def _admin_page(page: str) -> HTMLResponse:
         if (!response.ok) {{
           throw new Error(result.detail || result?.error?.message || `HTTP ${{response.status}}`);
         }}
-        actionStatus.textContent = `Success: ${{JSON.stringify(result)}}`;
+        if (form.dataset.action === "business_create") {{
+          actionStatus.textContent = `Success: ${{result.business_account_name}} `
+            + `(${{result.business_account_id}})`;
+        }} else {{
+          actionStatus.textContent = `Success: ${{JSON.stringify(result)}}`;
+        }}
         form.reset();
         await load();
       }} catch (error) {{
@@ -470,6 +554,10 @@ def _admin_page(page: str) -> HTMLResponse:
         const response = await fetch(`${{endpoint}}${{query}}`, {{ credentials: "same-origin" }});
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const data = await response.json();
+        if (page === "business") {{
+          businessAccounts = data.items || [];
+          renderActions();
+        }}
         content.innerHTML = render(data);
       }} catch (error) {{
         content.innerHTML = `<p class="error">Failed to load: ${{escapeHtml(error.message)}}</p>`;

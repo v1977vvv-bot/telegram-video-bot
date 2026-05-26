@@ -66,6 +66,8 @@ from backend.app.schemas.admin import (
     AdminUserSummary,
     AdminWaitingPodJobItem,
     AdminWaitingPodJobsResponse,
+    BusinessAccountCreateRequest,
+    BusinessAccountCreateResponse,
     BusinessMemberAddRequest,
     BusinessMemberRemoveRequest,
     FailRefundJobRequest,
@@ -82,7 +84,7 @@ from backend.app.services.balances import BalanceService
 from backend.app.services.business_balance import BusinessBalanceService
 from backend.app.services.payment_reconciliation import CryptoBotPaymentReconciliationService
 from backend.app.services.telegram_notify import TelegramNotificationService
-from shared.app.config import Settings
+from shared.app.config import Settings, get_settings
 from shared.app.database import get_session
 from shared.app.enums import (
     BalanceTransactionType,
@@ -262,10 +264,15 @@ async def list_admin_runpod_pods(
     _: AdminDep,
 ) -> AdminRunPodPodsResponse:
     result = await session.execute(select(RunpodPod).order_by(desc(RunpodPod.created_at)))
+    pods = list(result.scalars())
     plan = await calculate_queue_load_plan_for_async_session(session)
+    settings = get_settings()
     return AdminRunPodPodsResponse(
-        items=[_admin_runpod_pod_item(pod) for pod in result.scalars()],
+        items=[_admin_runpod_pod_item(pod) for pod in pods],
         queue_load_plan=_admin_queue_load_plan_item(plan),
+        runpod_auto_create_enabled=settings.runpod_auto_create_enabled,
+        manual_only_mode=not settings.runpod_auto_create_enabled,
+        starting_count=sum(1 for pod in pods if pod.status == PodStatus.STARTING.value),
     )
 
 
@@ -288,7 +295,7 @@ async def admin_sync_runpod_pods(
             metadata={"reason": reason, **result.as_dict()},
         )
         audit_log_id = audit_log.id
-    return _admin_runpod_sync_response(result, audit_log_id=audit_log_id)
+    return _admin_runpod_sync_response(result, audit_log_id=audit_log_id, settings=settings)
 
 
 @router.post("/runpod/pods/check-health", response_model=AdminRunPodHealthCheckResponse)
@@ -361,6 +368,104 @@ async def list_admin_business_accounts(
     accounts = list(result.scalars())
     items = [await _admin_business_account_item(session, account) for account in accounts]
     return AdminBusinessAccountsResponse(items=items, limit=limit, offset=offset)
+
+
+@router.post("/business-accounts", response_model=BusinessAccountCreateResponse)
+async def admin_create_business_account(
+    payload: BusinessAccountCreateRequest,
+    request: Request,
+    session: SessionDep,
+    admin: AdminDep,
+    settings: ActionSettingsDep,
+) -> BusinessAccountCreateResponse:
+    reason = _validate_action_reason(payload.reason, settings)
+    name = _validate_business_account_name(payload.name)
+    initial_balance = _validate_admin_non_negative_amount(
+        payload.initial_balance_usd or MONEY_ZERO,
+        settings,
+    )
+    notification_sent: bool | None = None
+    warning: str | None = None
+
+    async with session.begin():
+        owner = await _get_optional_business_owner(session, payload)
+        account = BusinessAccount(
+            name=name,
+            status=BusinessAccountStatus.ACTIVE.value,
+            available_usd=MONEY_ZERO,
+            frozen_usd=MONEY_ZERO,
+        )
+        session.add(account)
+        await session.flush()
+
+        owner_member_id: UUID | None = None
+        if owner is not None:
+            await _ensure_no_other_active_business_membership(session, owner.id, account.id)
+            owner_member = BusinessAccountMember(
+                business_account_id=account.id,
+                user_id=owner.id,
+                role=BusinessAccountMemberRole.OWNER.value,
+                is_active=True,
+            )
+            session.add(owner_member)
+            await session.flush()
+            owner_member_id = owner_member.id
+
+        transaction_id: UUID | None = None
+        if initial_balance > MONEY_ZERO:
+            mutation = await BusinessBalanceService(session).manual_topup_business_balance(
+                business_account_id=account.id,
+                amount_usd=initial_balance,
+                reason=reason,
+                admin_note=f"admin={admin}; business_account_create",
+            )
+            if mutation.transaction is None:
+                raise AppError("Business top-up transaction was not created", code="topup_failed")
+            transaction_id = mutation.transaction.id
+            await session.refresh(account)
+
+        audit_log = await AdminAuditService(session).log(
+            admin_identifier=str(admin),
+            action="business_account_create",
+            request=request,
+            target_type="business_account",
+            target_id=str(account.id),
+            metadata={
+                "business_account_id": str(account.id),
+                "name": account.name,
+                "owner_user_id": str(owner.id) if owner is not None else None,
+                "owner_member_id": str(owner_member_id) if owner_member_id is not None else None,
+                "initial_balance_usd": str(initial_balance),
+                "transaction_id": str(transaction_id) if transaction_id is not None else None,
+                "reason": reason,
+            },
+        )
+        business_account_id = account.id
+        business_account_name = account.name
+        owner_user_id = owner.id if owner is not None else None
+        owner_telegram_id = owner.telegram_id if owner is not None else None
+        audit_log_id = audit_log.id
+
+    if owner_telegram_id is not None:
+        notification_sent, warning = await _send_telegram_notification(
+            telegram_id=owner_telegram_id,
+            message=(
+                "🏢 Вам создан бизнес-аккаунт\n\n"
+                f"Компания: {business_account_name}\n"
+                "Вы назначены владельцем.\n"
+                f"Баланс компании: ${initial_balance.quantize(Decimal('0.01'))}"
+            ),
+        )
+
+    return BusinessAccountCreateResponse(
+        business_account_id=business_account_id,
+        business_account_name=business_account_name,
+        owner_user_id=owner_user_id,
+        initial_balance_usd=initial_balance,
+        audit_log_id=audit_log_id,
+        telegram_notification_sent=notification_sent,
+        warning=warning,
+    )
 
 
 @router.get(
@@ -1029,12 +1134,15 @@ async def _overview_runpod(session: AsyncSession) -> AdminOverviewRunPod:
     idle_pods = sum(
         1 for pod in pods if pod.status in {PodStatus.IDLE.value, PodStatus.READY.value}
     )
+    starting_pods = sum(1 for pod in pods if pod.status == PodStatus.STARTING.value)
     busy_pods = sum(1 for pod in pods if pod.status == PodStatus.BUSY.value)
     estimated_cost = sum((_pod_estimated_cost(pod) or MONEY_ZERO for pod in pods), MONEY_ZERO)
     return AdminOverviewRunPod(
         active_pods=len(pods),
+        starting_pods=starting_pods,
         idle_pods=idle_pods,
         busy_pods=busy_pods,
+        auto_create_enabled=get_settings().runpod_auto_create_enabled,
         estimated_active_cost_usd=estimated_cost,
     )
 
@@ -1151,6 +1259,7 @@ def _admin_runpod_pod_item(pod: RunpodPod) -> AdminRunPodPodItem:
         health_status=_pod_health_status(pod),
         created_at=pod.created_at,
         updated_at=pod.updated_at,
+        registered_age_minutes=_pod_age_minutes(pod),
         last_healthcheck_at=pod.last_healthcheck_at,
         last_heartbeat_at=pod.last_heartbeat_at,
         last_used_at=pod.last_used_at,
@@ -1179,11 +1288,13 @@ async def _admin_business_account_item(
     )
     return AdminBusinessAccountListItem(
         id=account.id,
+        short_id=str(account.id)[:8],
         name=account.name,
         status=account.status,
         available_usd=account.available_usd,
         frozen_usd=account.frozen_usd,
         active_members_count=int(active_members or 0),
+        members_count=int(active_members or 0),
         created_at=account.created_at,
         updated_at=account.updated_at,
     )
@@ -1480,6 +1591,24 @@ async def _get_user_for_admin_member_payload(
     return user
 
 
+async def _get_optional_business_owner(
+    session: AsyncSession,
+    payload: BusinessAccountCreateRequest,
+) -> User | None:
+    if payload.owner_user_id is not None:
+        user = await session.get(User, payload.owner_user_id)
+    elif payload.owner_telegram_id is not None:
+        result = await session.execute(
+            select(User).where(User.telegram_id == payload.owner_telegram_id)
+        )
+        user = result.scalar_one_or_none()
+    else:
+        return None
+    if user is None:
+        raise AppError("Owner user not found", code="owner_user_not_found", status_code=404)
+    return user
+
+
 async def _get_user_for_topup_identifier(session: AsyncSession, identifier: str) -> User:
     try:
         user_uuid = UUID(identifier)
@@ -1634,6 +1763,36 @@ def _validate_action_reason(reason: str, settings: Settings) -> str:
     return normalized or "admin action"
 
 
+def _validate_business_account_name(name: str) -> str:
+    normalized = " ".join(name.strip().split())
+    if not normalized:
+        raise AppError(
+            "Business account name is required",
+            code="business_account_name_required",
+            status_code=400,
+        )
+    if len(normalized) > 120:
+        raise AppError(
+            "Business account name is too long",
+            code="business_account_name_too_long",
+            status_code=400,
+        )
+    return normalized
+
+
+def _validate_admin_non_negative_amount(amount: Decimal, settings: Settings) -> Decimal:
+    normalized = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    if normalized < MONEY_ZERO:
+        raise AppError("Amount must be non-negative", code="invalid_amount", status_code=400)
+    if normalized > settings.admin_max_manual_topup_usd:
+        raise AppError(
+            f"Amount exceeds admin limit ${settings.admin_max_manual_topup_usd}",
+            code="admin_amount_limit_exceeded",
+            status_code=400,
+        )
+    return normalized
+
+
 def _validate_admin_amount(amount: Decimal, settings: Settings) -> Decimal:
     normalized = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
     if normalized <= Decimal("0"):
@@ -1708,12 +1867,23 @@ def _pod_health_status(pod: RunpodPod) -> str:
         PodStatus.TERMINATED.value,
         PodStatus.DELETED.value,
     }:
-        return "unhealthy"
+        return "failed"
+    if pod.status in {PodStatus.CREATING.value, PodStatus.STARTING.value}:
+        return "pending"
     if pod.last_healthcheck_at is not None and pod.error_message is None:
         return "healthy"
     if pod.error_message:
         return "unhealthy"
     return "unknown"
+
+
+def _pod_age_minutes(pod: RunpodPod) -> int | None:
+    started_at = pod.created_at or pod.last_heartbeat_at or pod.updated_at
+    if started_at is None:
+        return None
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+    return max(0, int((datetime.now(UTC) - started_at).total_seconds() // 60))
 
 
 def _sync_runpod_pods_from_runpod() -> RunPodDiscoveryResult:
@@ -1735,12 +1905,18 @@ def _admin_runpod_sync_response(
     result: RunPodDiscoveryResult,
     *,
     audit_log_id: UUID | None,
+    settings: Settings,
 ) -> AdminRunPodSyncResponse:
     return AdminRunPodSyncResponse(
         found=result.found,
         registered=result.registered,
         updated=result.updated,
         healthy=result.healthy,
+        starting=result.starting,
+        skipped_count=len(result.skipped),
+        starting_healthcheck_interval_seconds=(
+            settings.runpod_discovery_starting_healthcheck_interval_seconds
+        ),
         skipped=[AdminRunPodSkippedPod(**item.as_dict()) for item in result.skipped],
         audit_log_id=audit_log_id,
     )

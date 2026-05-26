@@ -230,10 +230,24 @@ def _runpod_config_ops_status(settings) -> dict[str, object]:
         "global_network": settings.runpod_global_network,
         "fallback_global_network": settings.runpod_fallback_global_network or None,
         "experimental_low_vram_startup": settings.runpod_experimental_low_vram_startup,
+        "auto_create_enabled": settings.runpod_auto_create_enabled,
         "discovery_enabled": settings.runpod_discovery_enabled,
         "discovery_interval_seconds": settings.runpod_discovery_interval_seconds,
         "discovery_auto_register": settings.runpod_discovery_auto_register,
         "discovery_require_healthy": settings.runpod_discovery_require_healthy,
+        "discovery_register_starting": settings.runpod_discovery_register_starting,
+        "discovery_starting_healthcheck_enabled": (
+            settings.runpod_discovery_starting_healthcheck_enabled
+        ),
+        "discovery_starting_healthcheck_interval_seconds": (
+            settings.runpod_discovery_starting_healthcheck_interval_seconds
+        ),
+        "discovery_starting_healthcheck_timeout_minutes": (
+            settings.runpod_discovery_starting_healthcheck_timeout_minutes
+        ),
+        "discovery_auto_retry_waiting_on_healthy": (
+            settings.runpod_discovery_auto_retry_waiting_on_healthy
+        ),
         "queue_load_planning_enabled": settings.runpod_queue_load_planning_enabled,
         "target_queue_minutes_per_pod_min": settings.runpod_target_queue_minutes_per_pod_min,
         "target_queue_minutes_per_pod_max": settings.runpod_target_queue_minutes_per_pod_max,

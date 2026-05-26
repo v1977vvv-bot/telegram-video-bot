@@ -180,6 +180,8 @@ def _format_overview(overview: dict[str, Any], pods: dict[str, Any]) -> str:
         "active_pods_count",
         int(dict(overview.get("runpod") or {}).get("active_pods") or 0),
     )
+    runpod = dict(overview.get("runpod") or {})
+    auto_create = "enabled" if runpod.get("auto_create_enabled", True) else "disabled"
     waiting_minutes = _plan_minutes(plan, "total_waiting_audio_minutes")
     target_min = _plan_minutes(plan, "target_minutes_per_pod_min", default="5.0")
     target_max = _plan_minutes(plan, "target_minutes_per_pod_max", default="6.0")
@@ -193,6 +195,7 @@ def _format_overview(overview: dict[str, Any], pods: dict[str, Any]) -> str:
         f"Generating: {jobs.get('generating', 0)}\n"
         f"Failed 24h: {jobs.get('failed_24h', 0)}\n\n"
         "RunPod:\n"
+        f"RunPod auto-create: {auto_create}\n"
         f"Активных pod’ов: {active}\n"
         f"Healthy ComfyUI: {healthy}\n"
         f"Busy: {busy}\n"
@@ -211,13 +214,25 @@ def _format_sync_result(result: dict[str, Any]) -> str:
     )
     if not skipped_text:
         skipped_text = "—"
+    starting = int(result.get("starting") or 0)
+    interval = int(result.get("starting_healthcheck_interval_seconds") or 30)
+    starting_text = (
+        "\n\n⏳ Некоторые pod’ы ещё запускаются.\n"
+        f"Я буду проверять ComfyUI каждые {interval} секунд.\n"
+        "Когда pod станет готов, пришлю уведомление."
+        if starting > 0
+        else ""
+    )
     return (
-        "✅ Sync завершён\n\n"
+        "🔄 Sync завершён\n\n"
         f"Найдено: {result.get('found', 0)}\n"
+        f"Healthy: {result.get('healthy', 0)}\n"
+        f"Starting: {starting}\n"
+        f"Skipped: {result.get('skipped_count', len(skipped))}\n"
         f"Добавлено: {result.get('registered', 0)}\n"
         f"Обновлено: {result.get('updated', 0)}\n"
-        f"Healthy: {result.get('healthy', 0)}\n"
-        f"Skipped:\n{skipped_text}"
+        f"\nSkipped details:\n{skipped_text}"
+        f"{starting_text}"
     )
 
 
@@ -226,14 +241,21 @@ def _format_pods(result: dict[str, Any]) -> str:
     if not items:
         return "🖥 Pod’ы\n\nНет pod’ов в базе."
     lines = ["🖥 Pod’ы"]
+    auto_create = "enabled" if result.get("runpod_auto_create_enabled", True) else "disabled"
+    starting_count = int(result.get("starting_count") or 0)
+    lines.append(f"RunPod auto-create: {auto_create}")
+    lines.append(f"Starting: {starting_count}")
     for pod in items[:10]:
         job_id = pod.get("current_job_id") or pod.get("active_job_id") or "—"
+        last_check = pod.get("last_healthcheck_at") or pod.get("last_heartbeat_at") or "—"
         lines.append(
             "\n"
             f"{escape(str(pod.get('runpod_pod_id') or '')[:10])}\n"
             f"GPU: {escape(str(pod.get('gpu_type') or 'unknown'))}\n"
             f"Status: {escape(str(pod.get('status') or 'unknown'))}\n"
             f"Health: {escape(str(pod.get('health_status') or 'unknown'))}\n"
+            f"Registered age: {escape(str(pod.get('registered_age_minutes') or 0))} min\n"
+            f"Last healthcheck: {escape(str(last_check))}\n"
             f"Job: {escape(str(job_id)[:8])}\n"
             f"Last busy: {escape(str(pod.get('last_busy_at') or '—'))}"
         )
