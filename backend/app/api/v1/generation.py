@@ -6,6 +6,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.repositories.users import UserRepository
+from backend.app.schemas.batch_generation import (
+    BatchConfirmResponse,
+    BatchDetailResponse,
+    BatchDraftErrorResponse,
+    BatchDraftItemResponse,
+    BatchDraftResponse,
+)
 from backend.app.schemas.generation import (
     GenerationConfirmResponse,
     GenerationDraftResponse,
@@ -17,8 +25,10 @@ from backend.app.schemas.generation import (
     TelegramUserJobRequest,
 )
 from backend.app.schemas.settings import AvailableFormatResponse
+from backend.app.services.batch_generation import BatchDraftSummary, BatchGenerationService
 from backend.app.services.generation import FilePayload, GenerationService
 from backend.app.workers.celery_client import enqueue_generation_job
+from shared.app.exceptions import AppError
 from shared.app.database import get_session
 
 router = APIRouter(prefix="/generation", tags=["generation"])
@@ -66,6 +76,51 @@ async def create_generation_draft(
             for item in summary.available_formats
         ],
     )
+
+
+@router.post("/batches/draft", response_model=BatchDraftResponse)
+async def create_generation_batch_draft(
+    session: SessionDep,
+    telegram_id: TelegramIdForm,
+    archive: UploadFileDep,
+    quality_profile: QualityProfileForm = None,
+) -> BatchDraftResponse:
+    user = await _get_active_user(session, telegram_id)
+    summary = await BatchGenerationService(session).create_batch_draft(
+        user_id=user.id,
+        filename=archive.filename or "batch.zip",
+        content=await archive.read(),
+        quality_profile=quality_profile or "480p",
+    )
+    return _batch_response(summary, BatchDraftResponse)
+
+
+@router.post("/batches/{batch_id}/confirm", response_model=BatchConfirmResponse)
+async def confirm_generation_batch(
+    batch_id: UUID,
+    payload: TelegramUserJobRequest,
+    session: SessionDep,
+) -> BatchConfirmResponse:
+    user = await _get_active_user(session, payload.telegram_id)
+    summary = await BatchGenerationService(session).confirm_batch(
+        user_id=user.id,
+        batch_id=batch_id,
+    )
+    return _batch_response(summary, BatchConfirmResponse)
+
+
+@router.get("/batches/{batch_id}", response_model=BatchDetailResponse)
+async def get_generation_batch(
+    batch_id: UUID,
+    telegram_id: TelegramIdQuery,
+    session: SessionDep,
+) -> BatchDetailResponse:
+    user = await _get_active_user(session, telegram_id)
+    summary = await BatchGenerationService(session).get_batch(
+        user_id=user.id,
+        batch_id=batch_id,
+    )
+    return _batch_response(summary, BatchDetailResponse)
 
 
 @router.patch("/drafts/{job_id}/format", response_model=GenerationFormatResponse)
@@ -195,4 +250,52 @@ async def get_generation_job(
             )
             for segment in job.segments
         ],
+    )
+
+
+async def _get_active_user(session: AsyncSession, telegram_id: int):
+    user = await UserRepository().get_by_telegram_id(session, telegram_id)
+    if user is None:
+        raise AppError("User not found", code="user_not_found", status_code=404)
+    if user.is_banned:
+        raise AppError("User access is restricted", code="user_banned", status_code=403)
+    return user
+
+
+def _batch_response(
+    summary: BatchDraftSummary,
+    response_type: type[BatchDraftResponse],
+) -> BatchDraftResponse:
+    return response_type(
+        batch_id=summary.batch_id,
+        status=summary.status,
+        quality_profile=summary.quality_profile,
+        total_jobs=summary.total_jobs,
+        total_duration_seconds=summary.total_duration_seconds,
+        total_price_usd=summary.total_price_usd,
+        items=[
+            BatchDraftItemResponse(
+                item_id=item.item_id,
+                index=item.index,
+                basename=item.basename,
+                image_filename=item.image_filename,
+                audio_filename=item.audio_filename,
+                source_image_file_id=item.source_image_file_id,
+                source_audio_file_id=item.source_audio_file_id,
+                audio_duration_seconds=item.audio_duration_seconds,
+                price_usd=item.price_usd,
+                status=item.status,
+                generation_job_id=item.generation_job_id,
+            )
+            for item in summary.items
+        ],
+        errors=[
+            BatchDraftErrorResponse(
+                code=error.code,
+                message=error.message,
+                filename=error.filename,
+            )
+            for error in summary.errors
+        ],
+        job_ids=summary.job_ids,
     )

@@ -19,6 +19,15 @@ class JobStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class GenerationBatchStatus(StrEnum):
+    DRAFT = "draft"
+    CONFIRMED = "confirmed"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class FileType(StrEnum):
     IMAGE = "image"
     AUDIO = "audio"

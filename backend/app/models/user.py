@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from backend.app.models.balance_account import BalanceAccount
     from backend.app.models.balance_transaction import BalanceTransaction
     from backend.app.models.business_account_member import BusinessAccountMember
+    from backend.app.models.generation_batch import GenerationBatch
     from backend.app.models.generation_job import GenerationJob
     from backend.app.models.payment import Payment
     from backend.app.models.uploaded_file import UploadedFile
@@ -37,6 +38,10 @@ class User(TimestampMixin, Base):
     )
     generation_jobs: Mapped[list[GenerationJob]] = relationship(
         "GenerationJob",
+        back_populates="user",
+    )
+    generation_batches: Mapped[list[GenerationBatch]] = relationship(
+        "GenerationBatch",
         back_populates="user",
     )
     uploaded_files: Mapped[list[UploadedFile]] = relationship(

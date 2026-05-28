@@ -15,6 +15,7 @@ from backend.app.db.base import Base, TimestampMixin
 if TYPE_CHECKING:
     from backend.app.models.business_account import BusinessAccount
     from backend.app.models.business_balance_transaction import BusinessBalanceTransaction
+    from backend.app.models.generation_batch import GenerationBatch
     from backend.app.models.generation_segment import GenerationSegment
     from backend.app.models.user import User
 
@@ -68,6 +69,12 @@ class GenerationJob(TimestampMixin, Base):
         PG_UUID(as_uuid=True),
         ForeignKey("business_balance_transactions.id", ondelete="SET NULL"),
     )
+    batch_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("generation_batches.id", ondelete="SET NULL"),
+        index=True,
+    )
+    batch_index: Mapped[int | None] = mapped_column(Integer)
     error_message: Mapped[str | None] = mapped_column(Text)
     mock_result_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -89,6 +96,10 @@ class GenerationJob(TimestampMixin, Base):
     business_hold_transaction: Mapped[BusinessBalanceTransaction | None] = relationship(
         "BusinessBalanceTransaction",
         foreign_keys=[business_hold_transaction_id],
+    )
+    batch: Mapped[GenerationBatch | None] = relationship(
+        "GenerationBatch",
+        back_populates="jobs",
     )
     segments: Mapped[list[GenerationSegment]] = relationship(
         "GenerationSegment",
