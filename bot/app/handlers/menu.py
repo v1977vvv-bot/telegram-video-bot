@@ -5,7 +5,12 @@ from decimal import Decimal, InvalidOperation
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from bot.app.keyboards.main_menu import LEGACY_MENU_BUTTONS, MENU_BUTTONS, top_up_amounts_keyboard
+from bot.app.keyboards.main_menu import (
+    BATCH_GENERATION_BUTTONS,
+    LEGACY_MENU_BUTTONS,
+    MENU_BUTTONS,
+    top_up_amounts_keyboard,
+)
 from bot.app.services.backend_client import (
     BackendClientError,
     BackendNotFoundError,
@@ -23,7 +28,7 @@ TELEGRAM_GENERATION_HISTORY_LIMIT = 5
 MENU_BUTTONS_WITHOUT_GENERATION = tuple(
     item
     for item in (*MENU_BUTTONS, *LEGACY_MENU_BUTTONS)
-    if item not in {"🎬 Создать видео", "Сгенерировать видео"}
+    if item not in {"🎬 Создать видео", "Сгенерировать видео", *BATCH_GENERATION_BUTTONS}
 )
 STATUS_DISPLAY = {
     "draft": "📝 черновик",

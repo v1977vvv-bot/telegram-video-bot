@@ -14,6 +14,7 @@ from shared.app.config import get_settings
 
 MENU_BUTTONS = (
     "🎬 Создать видео",
+    "📦 Пакетная генерация",
     "💰 Баланс",
     "➕ Пополнить",
     "📊 Статистика",
@@ -30,12 +31,14 @@ LEGACY_MENU_BUTTONS = (
     "Поддержка",
 )
 CREATE_VIDEO_BUTTONS = {"🎬 Создать видео", "Сгенерировать видео"}
+BATCH_GENERATION_BUTTONS = {"📦 Пакетная генерация"}
 CANCEL_BUTTONS = {"❌ Отмена", "Отмена"}
 
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text="🎬 Создать видео")],
+        [KeyboardButton(text="📦 Пакетная генерация")],
         [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="➕ Пополнить")],
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🗂 Мои видео")],
         [KeyboardButton(text="ℹ️ Как это работает"), KeyboardButton(text="🆘 Поддержка")],
@@ -70,6 +73,19 @@ def _format_amount_label(amount: Decimal) -> str:
     return f"${amount}"
 
 
+def _format_money_label(amount: Decimal) -> str:
+    text = (
+        format(amount.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP), "f")
+        .rstrip("0")
+        .rstrip(".")
+    )
+    if "." not in text:
+        text = f"{text}.00"
+    elif len(text.rsplit(".", maxsplit=1)[1]) == 1:
+        text = f"{text}0"
+    return f"${text}"
+
+
 def cancel_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Отмена")]],
@@ -85,6 +101,35 @@ def generation_quality_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="720p", callback_data="generation_quality:720p"),
         ],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="generation_cancel")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def batch_generation_quality_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [
+            InlineKeyboardButton(text="480p", callback_data="batch_quality:480p"),
+            InlineKeyboardButton(text="720p", callback_data="batch_quality:720p"),
+        ],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="batch_cancel")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def batch_generation_confirm_keyboard(
+    *,
+    quality_profile: str,
+    price_usd: Decimal,
+) -> InlineKeyboardMarkup:
+    amount = _format_money_label(price_usd)
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                text=f"✅ Запустить пакет {quality_profile} — {amount}",
+                callback_data="batch_confirm",
+            )
+        ],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="batch_cancel")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -144,16 +189,8 @@ def generation_confirm_keyboard(
 ) -> InlineKeyboardMarkup:
     label = "✅ Запустить"
     if quality_profile and price_usd is not None:
-        amount = (
-            format(price_usd.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP), "f")
-            .rstrip("0")
-            .rstrip(".")
-        )
-        if "." not in amount:
-            amount = f"{amount}.00"
-        elif len(amount.rsplit(".", maxsplit=1)[1]) == 1:
-            amount = f"{amount}0"
-        label = f"✅ Запустить {quality_profile} — ${amount}"
+        amount = _format_money_label(price_usd)
+        label = f"✅ Запустить {quality_profile} — {amount}"
     keyboard = [
         [InlineKeyboardButton(text=label, callback_data="generation_confirm")],
         [InlineKeyboardButton(text="↩️ Назад", callback_data="generation_cancel")],

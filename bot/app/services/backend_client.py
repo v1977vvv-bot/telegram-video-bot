@@ -143,6 +143,39 @@ class GenerationConfirmDto:
 
 
 @dataclass(frozen=True, slots=True)
+class BatchDraftErrorDto:
+    code: str
+    message: str
+    filename: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchDraftItemDto:
+    item_id: UUID | None
+    index: int
+    basename: str
+    image_filename: str
+    audio_filename: str
+    audio_duration_seconds: Decimal
+    price_usd: Decimal
+    status: str
+    generation_job_id: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchDraftDto:
+    batch_id: UUID | None
+    status: str | None
+    quality_profile: str
+    total_jobs: int
+    total_duration_seconds: Decimal | None
+    total_price_usd: Decimal | None
+    items: list[BatchDraftItemDto]
+    errors: list[BatchDraftErrorDto]
+    job_ids: list[UUID]
+
+
+@dataclass(frozen=True, slots=True)
 class PaymentPackageDto:
     amount_usd: Decimal
     display_label: str
@@ -384,6 +417,38 @@ class BotBackendClient:
             business_account_name=data.get("business_account_name"),
         )
 
+    async def create_batch_draft(
+        self,
+        *,
+        telegram_id: int,
+        filename: str,
+        content: bytes,
+        quality_profile: str,
+    ) -> BatchDraftDto:
+        data = await self._request(
+            "POST",
+            "/api/v1/generation/batches/draft",
+            data={"telegram_id": str(telegram_id), "quality_profile": quality_profile},
+            files={"archive": (filename, content, "application/zip")},
+        )
+        return self._parse_batch(data)
+
+    async def confirm_batch(self, *, batch_id: UUID, telegram_id: int) -> BatchDraftDto:
+        data = await self._request(
+            "POST",
+            f"/api/v1/generation/batches/{batch_id}/confirm",
+            json={"telegram_id": telegram_id},
+        )
+        return self._parse_batch(data)
+
+    async def get_batch(self, *, batch_id: UUID, telegram_id: int) -> BatchDraftDto:
+        data = await self._request(
+            "GET",
+            f"/api/v1/generation/batches/{batch_id}",
+            params={"telegram_id": telegram_id},
+        )
+        return self._parse_batch(data)
+
     async def get_payment_packages(self) -> list[PaymentPackageDto]:
         data = await self._request("GET", "/api/v1/payments/packages")
         return [
@@ -550,4 +615,46 @@ class BotBackendClient:
             name=str(data["name"]),
             available_usd=Decimal(str(data["available_usd"])),
             frozen_usd=Decimal(str(data["frozen_usd"])),
+        )
+
+    def _parse_batch(self, data: dict[str, Any]) -> BatchDraftDto:
+        return BatchDraftDto(
+            batch_id=UUID(data["batch_id"]) if data.get("batch_id") is not None else None,
+            status=str(data["status"]) if data.get("status") is not None else None,
+            quality_profile=str(data.get("quality_profile") or "480p"),
+            total_jobs=int(data.get("total_jobs") or 0),
+            total_duration_seconds=Decimal(str(data["total_duration_seconds"]))
+            if data.get("total_duration_seconds") is not None
+            else None,
+            total_price_usd=Decimal(str(data["total_price_usd"]))
+            if data.get("total_price_usd") is not None
+            else None,
+            items=[
+                BatchDraftItemDto(
+                    item_id=UUID(item["item_id"]) if item.get("item_id") is not None else None,
+                    index=int(item["index"]),
+                    basename=str(item["basename"]),
+                    image_filename=str(item["image_filename"]),
+                    audio_filename=str(item["audio_filename"]),
+                    audio_duration_seconds=Decimal(str(item["audio_duration_seconds"])),
+                    price_usd=Decimal(str(item["price_usd"])),
+                    status=str(item["status"]),
+                    generation_job_id=UUID(item["generation_job_id"])
+                    if item.get("generation_job_id") is not None
+                    else None,
+                )
+                for item in data.get("items", [])
+            ],
+            errors=[
+                BatchDraftErrorDto(
+                    code=str(error["code"]),
+                    message=str(error["message"]),
+                    filename=error.get("filename"),
+                )
+                for error in data.get("errors", [])
+            ],
+            job_ids=[
+                UUID(job_id)
+                for job_id in (data.get("job_ids") or [])
+            ],
         )
