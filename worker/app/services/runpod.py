@@ -77,66 +77,74 @@ class RunPodClient:
         *,
         cloud_type: str | None = None,
         cloud_phase: str | None = None,
+        template_id: str | None = None,
+        gpu_count: int | None = None,
     ) -> RunPodPodInfo:
         if not self._settings.runpod_auto_create_enabled:
             logger.info("RunPod auto-create disabled; waiting for manual/discovered pod")
             raise RunPodCapacityError("RunPod auto-create disabled")
 
-        resolved_min_ram_gb = min_ram_gb or self._settings.runpod_min_ram_gb
-        resolved_cloud_type = cloud_type or self._settings.runpod_primary_cloud_type
+        resolved_template_id = (template_id or self._settings.runpod_template_id).strip()
+        if not resolved_template_id or resolved_template_id == "change_me":
+            raise RunPodError("RUNPOD_TEMPLATE_ID is not configured")
+        resolved_gpu_count = max(gpu_count or 1, 1)
         payload = self.build_create_pod_payload(
             gpu_type,
-            min_ram_gb=resolved_min_ram_gb,
-            cloud_type=resolved_cloud_type,
+            min_ram_gb=min_ram_gb,
+            cloud_type=cloud_type,
             cloud_phase=cloud_phase,
+            template_id=resolved_template_id,
+            gpu_count=resolved_gpu_count,
         )
         logger.info(
-            "RunPod pod create requested cloud_type=%s gpu_type=%s min_ram_gb=%s",
-            resolved_cloud_type,
+            "RunPod pod create requested gpu_type=%s template_id=%s gpu_count=%s",
             gpu_type,
-            resolved_min_ram_gb,
+            resolved_template_id,
+            resolved_gpu_count,
         )
         _log_safe_create_payload(payload)
         try:
             response = self._client.post("/pods", json=payload, headers=self._headers())
         except httpx.TimeoutException as exc:
             raise RunPodCapacityError(
-                f"RunPod create request timed out for cloud_type={resolved_cloud_type} "
-                f"gpu_type={gpu_type} min_ram_gb={resolved_min_ram_gb}"
+                f"RunPod create request timed out for gpu_type={gpu_type} "
+                f"template_id={resolved_template_id} gpu_count={resolved_gpu_count}"
             ) from exc
         except httpx.TransportError as exc:
             raise RunPodCapacityError(
-                f"RunPod create request failed for cloud_type={resolved_cloud_type} "
-                f"gpu_type={gpu_type} min_ram_gb={resolved_min_ram_gb}: {exc.__class__.__name__}"
+                f"RunPod create request failed for gpu_type={gpu_type} "
+                f"template_id={resolved_template_id} gpu_count={resolved_gpu_count}: "
+                f"{exc.__class__.__name__}"
             ) from exc
         if _is_capacity_error(response):
             body = _safe_response_body(response)
             details = f": {body}" if body else ""
             raise RunPodCapacityError(
-                f"RunPod capacity unavailable for cloud_type={resolved_cloud_type} "
-                f"gpu_type={gpu_type} "
-                f"min_ram_gb={resolved_min_ram_gb}: {_http_status_summary(response)}{details}"
+                f"RunPod capacity unavailable for gpu_type={gpu_type} "
+                f"template_id={resolved_template_id} gpu_count={resolved_gpu_count}: "
+                f"{_http_status_summary(response)}{details}"
             )
         if _is_retryable_create_error(response):
             body = _safe_response_body(response)
             details = f": {body}" if body else ""
             raise RunPodCapacityError(
-                f"RunPod create transient failure for cloud_type={resolved_cloud_type} "
-                f"gpu_type={gpu_type} "
-                f"min_ram_gb={resolved_min_ram_gb}: {_http_status_summary(response)}{details}"
+                f"RunPod create transient failure for gpu_type={gpu_type} "
+                f"template_id={resolved_template_id} gpu_count={resolved_gpu_count}: "
+                f"{_http_status_summary(response)}{details}"
             )
         self._raise_for_response(response, "RunPod pod create failed")
         info = self._pod_info_from_response(
             response.json(),
-            fallback_cloud_type=resolved_cloud_type,
+            fallback_cloud_type=cloud_type,
             fallback_gpu_type=gpu_type,
+            fallback_template_id=resolved_template_id,
         )
         logger.info(
-            "RunPod pod created pod_id=%s cloud_type=%s gpu_type=%s min_ram_gb=%s",
+            "RunPod pod created pod_id=%s gpu_type=%s template_id=%s gpu_count=%s",
             info.pod_id,
-            info.cloud_type or resolved_cloud_type,
             gpu_type,
-            resolved_min_ram_gb,
+            info.template_id or resolved_template_id,
+            resolved_gpu_count,
         )
         return info
 
@@ -174,44 +182,20 @@ class RunPodClient:
         min_ram_gb: int | None = None,
         cloud_type: str | None = None,
         cloud_phase: str | None = None,
+        template_id: str | None = None,
+        gpu_count: int | None = None,
     ) -> dict[str, Any]:
         """Build a RunPod REST /pods payload."""
 
-        resolved_min_ram_gb = min_ram_gb or self._settings.runpod_min_ram_gb
-        resolved_cloud_type = cloud_type or self._settings.runpod_primary_cloud_type
-        use_fallback_overrides = (cloud_phase or "").strip().lower() == "fallback"
-        ports = _phase_csv_list(
-            primary=self._settings.runpod_ports,
-            fallback=self._settings.runpod_fallback_ports,
-            use_fallback=use_fallback_overrides,
-        )
-        if not ports:
-            ports = [f"{self._settings.runpod_comfyui_port}/http"]
-        allowed_cuda_versions = _phase_csv_list(
-            primary=self._settings.runpod_allowed_cuda_versions
-            or self._settings.runpod_cuda_version,
-            fallback=self._settings.runpod_fallback_allowed_cuda_versions,
-            use_fallback=use_fallback_overrides,
-        )
+        del min_ram_gb, cloud_type, cloud_phase
+        resolved_template_id = (template_id or self._settings.runpod_template_id).strip()
+        resolved_gpu_count = max(gpu_count or 1, 1)
         payload: dict[str, Any] = {
             "name": f"ultronlab-comfyui-{uuid4().hex[:8]}",
-            "cloudType": resolved_cloud_type,
-            "containerDiskInGb": self._settings.runpod_container_disk_gb,
-            "volumeInGb": self._settings.runpod_volume_disk_gb,
-            "gpuCount": 1,
+            "templateId": resolved_template_id,
             "gpuTypeIds": [gpu_type],
-            "minRAMPerGPU": resolved_min_ram_gb,
-            "minVCPUPerGPU": self._settings.runpod_min_vcpu,
-            "templateId": self._settings.runpod_template_id,
-            "ports": ports,
-            "supportPublicIp": _phase_bool(
-                primary=self._settings.runpod_support_public_ip,
-                fallback=self._settings.runpod_fallback_support_public_ip,
-                use_fallback=use_fallback_overrides,
-            ),
+            "gpuCount": resolved_gpu_count,
         }
-        if allowed_cuda_versions:
-            payload["allowedCudaVersions"] = allowed_cuda_versions
         return payload
 
     def build_comfyui_base_url(self, pod_id: str, port: int | None = None) -> str:
@@ -234,6 +218,7 @@ class RunPodClient:
         fallback_pod_id: str | None = None,
         fallback_cloud_type: str | None = None,
         fallback_gpu_type: str | None = None,
+        fallback_template_id: str | None = None,
     ) -> RunPodPodInfo:
         if not isinstance(data, dict):
             raise RunPodError("RunPod API returned a non-object response")
@@ -249,10 +234,14 @@ class RunPodClient:
             or _nested_first_string(payload, ("machine", "gpuTypeId"), ("machine", "gpuType"))
             or fallback_gpu_type
         )
-        template_id = _first_string(payload, "templateId", "template_id") or _nested_first_string(
-            payload,
-            ("template", "id"),
-            ("runtime", "templateId"),
+        template_id = (
+            _first_string(payload, "templateId", "template_id")
+            or _nested_first_string(
+                payload,
+                ("template", "id"),
+                ("runtime", "templateId"),
+            )
+            or fallback_template_id
         )
         ports = _extract_ports(payload)
         return RunPodPodInfo(
@@ -409,19 +398,11 @@ def _phase_bool(*, primary: bool, fallback: str, use_fallback: bool) -> bool:
 
 def _log_safe_create_payload(payload: dict[str, Any]) -> None:
     logger.info(
-        "RunPod create payload cloudType=%s templateId=%s gpuTypeIds=%s "
-        "minRAMPerGPU=%s minVCPUPerGPU=%s containerDiskInGb=%s volumeInGb=%s "
-        "ports=%s allowedCudaVersions=%s supportPublicIp=%s",
-        payload.get("cloudType"),
+        "RunPod create payload name=%s templateId=%s gpuTypeIds=%s gpuCount=%s",
+        payload.get("name"),
         payload.get("templateId"),
         payload.get("gpuTypeIds"),
-        payload.get("minRAMPerGPU"),
-        payload.get("minVCPUPerGPU"),
-        payload.get("containerDiskInGb"),
-        payload.get("volumeInGb"),
-        payload.get("ports"),
-        payload.get("allowedCudaVersions"),
-        payload.get("supportPublicIp"),
+        payload.get("gpuCount"),
     )
 
 

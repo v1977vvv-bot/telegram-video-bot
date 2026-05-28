@@ -4,7 +4,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 import httpx
@@ -45,11 +45,13 @@ class ManagedComfyUIEndpoint:
 
 
 @dataclass(frozen=True, slots=True)
-class RunPodCreateCloudStrategy:
-    phase: str
-    cloud_type: str
+class RunPodCreateStrategy:
+    tier: str
+    template_id: str
     gpu_types: list[str]
+    gpu_count: int
     max_attempts: int
+    default_hourly_cost_usd: Decimal | None
 
 
 class RunPodManager:
@@ -133,7 +135,11 @@ class RunPodManager:
             active_count,
             max_active_pods,
         )
-        pod = self._create_and_wait_for_pod(session, job_id=job_id)
+        pod = self._create_and_wait_for_pod(
+            session,
+            job_id=job_id,
+            active_count=active_count,
+        )
         return ManagedComfyUIEndpoint(
             base_url=pod.base_url or self._client.build_comfyui_base_url(pod.runpod_pod_id),
             managed=True,
@@ -334,7 +340,13 @@ class RunPodManager:
             return default_duration
         return Decimal(duration)
 
-    def _create_and_wait_for_pod(self, session: Session, *, job_id: UUID | None) -> RunpodPod:
+    def _create_and_wait_for_pod(
+        self,
+        session: Session,
+        *,
+        job_id: UUID | None,
+        active_count: int,
+    ) -> RunpodPod:
         if not self._settings.runpod_auto_create_enabled:
             logger.info("RunPod auto-create disabled; waiting for manual/discovered pod")
             raise RunPodPoolFullError(
@@ -343,133 +355,113 @@ class RunPodManager:
 
         last_error: Exception | None = None
         sleep_seconds = max(self._settings.runpod_create_retry_sleep_seconds, 0)
+        duration_seconds = self._estimate_job_duration_seconds(session, job_id)
+        strategies = self._create_routing_strategies(
+            job_id=job_id,
+            duration_seconds=duration_seconds,
+            active_count=active_count,
+        )
 
-        for strategy in self._create_cloud_strategies():
+        for strategy_index, strategy in enumerate(strategies):
             logger.info(
-                "RunPod create cloud strategy started phase=%s cloud_type=%s "
+                "RunPod create strategy started tier=%s template_id=%s gpu_count=%s "
                 "max_attempts=%s gpu_types=%s",
-                strategy.phase,
-                strategy.cloud_type,
+                strategy.tier,
+                strategy.template_id,
+                strategy.gpu_count,
                 strategy.max_attempts,
                 strategy.gpu_types,
             )
-            for resource_phase, min_ram_gb in self._create_resource_phases():
+            for attempt in range(1, strategy.max_attempts + 1):
                 logger.info(
-                    "RunPod create phase started cloud_phase=%s cloud_type=%s "
-                    "resource_phase=%s min_ram_gb=%s",
-                    strategy.phase,
-                    strategy.cloud_type,
-                    resource_phase,
-                    min_ram_gb,
+                    "RunPod create attempt started tier=%s attempt=%s max_attempts=%s",
+                    strategy.tier,
+                    attempt,
+                    strategy.max_attempts,
                 )
-                for attempt in range(1, strategy.max_attempts + 1):
-                    logger.info(
-                        "RunPod create attempt started cloud_phase=%s cloud_type=%s "
-                        "resource_phase=%s attempt=%s max_attempts=%s min_ram_gb=%s",
-                        strategy.phase,
-                        strategy.cloud_type,
-                        resource_phase,
-                        attempt,
-                        strategy.max_attempts,
-                        min_ram_gb,
-                    )
-                    for gpu_type in strategy.gpu_types:
-                        try:
-                            info = self._client.create_pod(
-                                gpu_type,
-                                min_ram_gb=min_ram_gb,
-                                cloud_type=strategy.cloud_type,
-                                cloud_phase=strategy.phase,
-                            )
-                        except RunPodCapacityError as exc:
-                            last_error = exc
-                            logger.warning(
-                                "RunPod capacity unavailable cloud_phase=%s cloud_type=%s "
-                                "resource_phase=%s gpu_type=%s min_ram_gb=%s attempt=%s",
-                                strategy.phase,
-                                strategy.cloud_type,
-                                resource_phase,
-                                gpu_type,
-                                min_ram_gb,
-                                attempt,
-                            )
-                            continue
-
-                        logger.info(
-                            "RunPod pod created cloud_type=%s gpu_type=%s "
-                            "min_ram_gb=%s cloud_phase=%s resource_phase=%s",
-                            info.cloud_type or strategy.cloud_type,
-                            info.gpu_type or gpu_type,
-                            min_ram_gb,
-                            strategy.phase,
-                            resource_phase,
+                for gpu_type in strategy.gpu_types:
+                    try:
+                        info = self._client.create_pod(
+                            gpu_type,
+                            template_id=strategy.template_id,
+                            gpu_count=strategy.gpu_count,
                         )
-                        pod = self._create_pod_record(
-                            session,
-                            info,
-                            cloud_type=info.cloud_type or strategy.cloud_type,
-                            gpu_type=gpu_type,
-                            job_id=job_id,
-                        )
-                        try:
-                            self._wait_for_comfyui_ready(info.base_url, info.pod_id)
-                        except ComfyUINotReadyError as exc:
-                            self._mark_pod_failed(session, pod, str(exc))
-                            if self._settings.runpod_auto_terminate:
-                                self._terminate_failed_pod(session, pod)
-                            raise
-
-                        with session.begin():
-                            refreshed = session.get(RunpodPod, pod.id, with_for_update=True)
-                            if refreshed is None:
-                                raise RunPodError(
-                                    f"RunPod pod record disappeared pod_id={pod.runpod_pod_id}"
-                                )
-                            now = datetime.now(UTC)
-                            refreshed.status = PodStatus.BUSY.value
-                            refreshed.active_job_id = job_id
-                            refreshed.current_job_id = job_id
-                            refreshed.last_healthcheck_at = now
-                            refreshed.last_busy_at = now
-                            refreshed.last_used_at = now
-                            refreshed.error_message = None
-                            logger.info(
-                                "ComfyUI ready pod_id=%s cloud_type=%s gpu_type=%s",
-                                refreshed.runpod_pod_id,
-                                refreshed.cloud_type,
-                                refreshed.gpu_type,
-                            )
-                            return refreshed
-
-                    if attempt < strategy.max_attempts:
+                    except RunPodCapacityError as exc:
+                        last_error = exc
                         logger.warning(
-                            "RunPod retrying create after capacity errors cloud_phase=%s "
-                            "cloud_type=%s resource_phase=%s sleep_seconds=%s",
-                            strategy.phase,
-                            strategy.cloud_type,
-                            resource_phase,
-                            sleep_seconds,
+                            "RunPod capacity unavailable tier=%s gpu_type=%s "
+                            "template_id=%s gpu_count=%s attempt=%s",
+                            strategy.tier,
+                            gpu_type,
+                            strategy.template_id,
+                            strategy.gpu_count,
+                            attempt,
                         )
-                        time.sleep(sleep_seconds)
+                        continue
 
-                logger.warning(
-                    "RunPod create phase exhausted cloud_phase=%s cloud_type=%s "
-                    "resource_phase=%s min_ram_gb=%s",
-                    strategy.phase,
-                    strategy.cloud_type,
-                    resource_phase,
-                    min_ram_gb,
-                )
+                    logger.info(
+                        "RunPod pod created tier=%s gpu_type=%s template_id=%s gpu_count=%s",
+                        strategy.tier,
+                        info.gpu_type or gpu_type,
+                        info.template_id or strategy.template_id,
+                        strategy.gpu_count,
+                    )
+                    pod = self._create_pod_record(
+                        session,
+                        info,
+                        cloud_type=info.cloud_type,
+                        gpu_type=gpu_type,
+                        template_id=info.template_id or strategy.template_id,
+                        hourly_price_usd=self._resolve_created_pod_hourly_price(
+                            info=info,
+                            strategy=strategy,
+                            gpu_type=gpu_type,
+                        ),
+                        job_id=job_id,
+                    )
+                    try:
+                        self._wait_for_comfyui_ready(info.base_url, info.pod_id)
+                    except ComfyUINotReadyError as exc:
+                        self._mark_pod_failed(session, pod, str(exc))
+                        if self._settings.runpod_auto_terminate:
+                            self._terminate_failed_pod(session, pod)
+                        raise
 
-            logger.warning(
-                "RunPod create cloud strategy exhausted phase=%s cloud_type=%s",
-                strategy.phase,
-                strategy.cloud_type,
-            )
-            if strategy.phase == "primary":
+                    with session.begin():
+                        refreshed = session.get(RunpodPod, pod.id, with_for_update=True)
+                        if refreshed is None:
+                            raise RunPodError(
+                                f"RunPod pod record disappeared pod_id={pod.runpod_pod_id}"
+                            )
+                        now = datetime.now(UTC)
+                        refreshed.status = PodStatus.BUSY.value
+                        refreshed.active_job_id = job_id
+                        refreshed.current_job_id = job_id
+                        refreshed.last_healthcheck_at = now
+                        refreshed.last_busy_at = now
+                        refreshed.last_used_at = now
+                        refreshed.error_message = None
+                        logger.info(
+                            "ComfyUI ready pod_id=%s cloud_type=%s gpu_type=%s",
+                            refreshed.runpod_pod_id,
+                            refreshed.cloud_type,
+                            refreshed.gpu_type,
+                        )
+                        return refreshed
+
+                if attempt < strategy.max_attempts:
+                    logger.warning(
+                        "RunPod retrying create after capacity errors tier=%s sleep_seconds=%s",
+                        strategy.tier,
+                        sleep_seconds,
+                    )
+                    time.sleep(sleep_seconds)
+
+            logger.warning("RunPod create strategy exhausted tier=%s", strategy.tier)
+            if strategy.tier == "cheap" and strategy_index < len(strategies) - 1:
                 logger.warning(
-                    "RunPod primary cloud unavailable, falling back to cloud_type=%s",
-                    self._settings.runpod_fallback_cloud_type,
+                    "RunPod cheap strategy unavailable, falling back to premium job_id=%s",
+                    job_id,
                 )
 
         if last_error is not None:
@@ -479,54 +471,89 @@ class RunPodManager:
             ) from last_error
         raise NoGpuAvailableError("GPU temporarily unavailable. Please try again later.")
 
-    def _create_cloud_strategies(self) -> list[RunPodCreateCloudStrategy]:
-        strategies: list[RunPodCreateCloudStrategy] = []
-        primary_gpu_types = self._settings.runpod_allowed_gpu_type_list
-        if primary_gpu_types:
-            strategies.append(
-                RunPodCreateCloudStrategy(
-                    phase="primary",
-                    cloud_type=self._settings.runpod_primary_cloud_type,
-                    gpu_types=primary_gpu_types,
-                    max_attempts=max(
-                        self._settings.runpod_primary_create_max_attempts,
-                        1,
-                    ),
-                )
-            )
+    def _create_routing_strategies(
+        self,
+        *,
+        job_id: UUID | None,
+        duration_seconds: Decimal,
+        active_count: int,
+    ) -> list[RunPodCreateStrategy]:
+        threshold = Decimal(max(self._settings.runpod_cheap_max_duration_seconds, 0))
+        premium = self._premium_create_strategy(
+            max_attempts=max(self._settings.runpod_primary_create_max_attempts, 1)
+        )
+        selected = "premium"
+        reason = "cheap_disabled"
+        strategies: list[RunPodCreateStrategy] = [premium] if premium is not None else []
 
-        fallback_gpu_types = self._settings.runpod_fallback_allowed_gpu_type_list
-        if fallback_gpu_types:
-            strategies.append(
-                RunPodCreateCloudStrategy(
-                    phase="fallback",
-                    cloud_type=self._settings.runpod_fallback_cloud_type,
-                    gpu_types=fallback_gpu_types,
-                    max_attempts=max(
-                        self._settings.runpod_fallback_create_max_attempts,
-                        1,
-                    ),
-                )
-            )
+        if self._settings.runpod_cheap_create_enabled:
+            if active_count > 0:
+                reason = "active_pods_exist"
+            elif duration_seconds > threshold:
+                reason = "duration_above_cheap_threshold"
+            else:
+                cheap = self._cheap_create_strategy()
+                if cheap is None:
+                    reason = "cheap_not_configured"
+                else:
+                    selected = "cheap"
+                    reason = "cheap_enabled_short_job_no_active_pods"
+                    premium_fallback = self._premium_create_strategy(
+                        max_attempts=max(self._settings.runpod_fallback_create_max_attempts, 1)
+                    )
+                    strategies = [cheap]
+                    if premium_fallback is not None:
+                        strategies.append(premium_fallback)
 
+        logger.info(
+            "RunPod routing decision job_id=%s duration=%s selected=%s reason=%s "
+            "active_count=%s cheap_threshold_seconds=%s",
+            job_id,
+            duration_seconds,
+            selected,
+            reason,
+            active_count,
+            threshold,
+        )
         return strategies
 
-    def _create_resource_phases(self) -> list[tuple[str, int]]:
-        phases = [("primary", self._settings.runpod_min_ram_gb)]
-        if (
-            self._settings.runpod_ram_fallback_enabled
-            and self._settings.runpod_fallback_min_ram_gb is not None
-        ):
-            phases.append(("fallback", self._settings.runpod_fallback_min_ram_gb))
-        return phases
+    def _cheap_create_strategy(self) -> RunPodCreateStrategy | None:
+        template_id = self._settings.runpod_cheap_template_id.strip()
+        gpu_types = self._settings.runpod_cheap_allowed_gpu_type_list
+        if not template_id or template_id == "change_me" or not gpu_types:
+            return None
+        return RunPodCreateStrategy(
+            tier="cheap",
+            template_id=template_id,
+            gpu_types=gpu_types,
+            gpu_count=max(self._settings.runpod_cheap_gpu_count, 1),
+            max_attempts=max(self._settings.runpod_primary_create_max_attempts, 1),
+            default_hourly_cost_usd=self._settings.runpod_cheap_default_hourly_cost_usd,
+        )
+
+    def _premium_create_strategy(self, *, max_attempts: int) -> RunPodCreateStrategy | None:
+        template_id = self._settings.runpod_effective_premium_template_id
+        gpu_types = self._settings.runpod_premium_allowed_gpu_type_list
+        if not template_id or template_id == "change_me" or not gpu_types:
+            return None
+        return RunPodCreateStrategy(
+            tier="premium",
+            template_id=template_id,
+            gpu_types=gpu_types,
+            gpu_count=max(self._settings.runpod_premium_gpu_count, 1),
+            max_attempts=max(max_attempts, 1),
+            default_hourly_cost_usd=self._settings.runpod_premium_default_hourly_cost,
+        )
 
     def _create_pod_record(
         self,
         session: Session,
         info: RunPodPodInfo,
         *,
-        cloud_type: str,
+        cloud_type: str | None,
         gpu_type: str,
+        template_id: str,
+        hourly_price_usd: Decimal,
         job_id: UUID | None,
     ) -> RunpodPod:
         with session.begin():
@@ -537,11 +564,8 @@ class RunPodManager:
                 status=PodStatus.STARTING.value,
                 cloud_type=cloud_type,
                 gpu_type=info.gpu_type or gpu_type,
-                template_id=self._settings.runpod_template_id,
-                hourly_price_usd=RunPodCostService(self._settings).get_cloud_gpu_hourly_cost(
-                    cloud_type=cloud_type,
-                    gpu_type=info.gpu_type or gpu_type,
-                ),
+                template_id=template_id,
+                hourly_price_usd=hourly_price_usd,
                 base_url=info.base_url,
                 comfyui_url=info.base_url,
                 comfyui_port=self._settings.runpod_comfyui_port,
@@ -552,6 +576,26 @@ class RunPodManager:
             session.flush()
             logger.info("RunPod pod record created pod_id=%s", pod.runpod_pod_id)
             return pod
+
+    def _resolve_created_pod_hourly_price(
+        self,
+        *,
+        info: RunPodPodInfo,
+        strategy: RunPodCreateStrategy,
+        gpu_type: str,
+    ) -> Decimal:
+        if info.hourly_price_usd:
+            try:
+                return Decimal(info.hourly_price_usd)
+            except InvalidOperation:
+                logger.warning(
+                    "RunPod hourly price from API is invalid pod_id=%s value=%s",
+                    info.pod_id,
+                    info.hourly_price_usd,
+                )
+        if strategy.default_hourly_cost_usd is not None:
+            return strategy.default_hourly_cost_usd
+        return RunPodCostService(self._settings).get_gpu_hourly_cost(info.gpu_type or gpu_type)
 
     def _count_active_pods(self, session: Session) -> int:
         statement = select(RunpodPod).where(

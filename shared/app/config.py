@@ -105,6 +105,16 @@ class Settings(BaseSettings):
     runpod_gpu_type: str = "RTX 4090"
     runpod_idle_timeout_seconds: int = 600
     runpod_max_active_pods: int = 1
+    runpod_cheap_create_enabled: bool = False
+    runpod_cheap_max_duration_seconds: int = 15
+    runpod_cheap_template_id: str = ""
+    runpod_cheap_allowed_gpu_types: str = "NVIDIA GeForce RTX 4090"
+    runpod_cheap_gpu_count: int = 1
+    runpod_cheap_default_hourly_cost_usd: Decimal = Field(default=Decimal("0.50"))
+    runpod_premium_template_id: str = ""
+    runpod_premium_allowed_gpu_types: str = ""
+    runpod_premium_gpu_count: int = 1
+    runpod_premium_default_hourly_cost_usd: str = ""
     runpod_cloud_type: str = "COMMUNITY"
     runpod_primary_cloud_type: str = "SECURE"
     runpod_fallback_cloud_type: str = "COMMUNITY"
@@ -333,11 +343,45 @@ class Settings(BaseSettings):
         ]
 
     @property
+    def runpod_cheap_allowed_gpu_type_list(self) -> list[str]:
+        return [
+            item.strip()
+            for item in self.runpod_cheap_allowed_gpu_types.split(",")
+            if item.strip()
+        ]
+
+    @property
+    def runpod_premium_allowed_gpu_type_list(self) -> list[str]:
+        premium_gpu_types = [
+            item.strip()
+            for item in self.runpod_premium_allowed_gpu_types.split(",")
+            if item.strip()
+        ]
+        return premium_gpu_types or self.runpod_allowed_gpu_type_list
+
+    @property
+    def runpod_effective_premium_template_id(self) -> str:
+        premium_template_id = self.runpod_premium_template_id.strip()
+        if premium_template_id:
+            return premium_template_id
+        return self.runpod_template_id.strip()
+
+    @property
+    def runpod_premium_default_hourly_cost(self) -> Decimal | None:
+        return _optional_nonnegative_decimal(self.runpod_premium_default_hourly_cost_usd)
+
+    @property
     def runpod_auto_manager_enabled(self) -> bool:
         api_key = self.runpod_api_key.strip()
-        template_id = self.runpod_template_id.strip()
+        template_ids = [
+            self.runpod_template_id.strip(),
+            self.runpod_effective_premium_template_id,
+            self.runpod_cheap_template_id.strip(),
+        ]
         return bool(
-            api_key and api_key != "change_me" and template_id and template_id != "change_me"
+            api_key
+            and api_key != "change_me"
+            and any(template_id and template_id != "change_me" for template_id in template_ids)
         )
 
     @property
