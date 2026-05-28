@@ -44,6 +44,12 @@ class GenerationJob(TimestampMixin, Base):
     fps: Mapped[int] = mapped_column(Integer, nullable=False, server_default="25")
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
+    quality_profile: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="480p",
+        server_default="480p",
+    )
     audio_duration_seconds: Mapped[Decimal | None] = mapped_column(Numeric(10, 3))
     segments_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     price_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))

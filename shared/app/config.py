@@ -114,7 +114,10 @@ class Settings(BaseSettings):
     runpod_premium_template_id: str = ""
     runpod_premium_allowed_gpu_types: str = ""
     runpod_premium_gpu_count: int = 1
-    runpod_premium_default_hourly_cost_usd: str = ""
+    runpod_premium_default_hourly_cost_usd: str = "1.71"
+    runpod_720p_require_premium: bool = True
+    runpod_480p_model_profile: str = "fp8_480p"
+    runpod_720p_model_profile: str = "fp8_720p"
     runpod_cloud_type: str = "COMMUNITY"
     runpod_primary_cloud_type: str = "SECURE"
     runpod_fallback_cloud_type: str = "COMMUNITY"
@@ -233,6 +236,12 @@ class Settings(BaseSettings):
 
     pricing_price_per_second_usd: Decimal = Field(default=Decimal("0.012"))
     pricing_min_job_price_usd: Decimal = Field(default=Decimal("0.30"))
+    video_480_min_duration_seconds: int = 5
+    video_480_min_price_usd: Decimal = Field(default=Decimal("0.15"))
+    video_480_price_per_extra_second_usd: Decimal = Field(default=Decimal("0.015"))
+    video_720_min_duration_seconds: int = 5
+    video_720_min_price_usd: Decimal = Field(default=Decimal("0.30"))
+    video_720_price_per_extra_second_usd: Decimal = Field(default=Decimal("0.030"))
     generation_fps: int = 25
     generation_max_segment_seconds: int = 30
     segment_image_strategy: str = "last_frame"

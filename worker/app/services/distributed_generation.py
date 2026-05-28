@@ -32,6 +32,8 @@ class DistributedJobContext(Protocol):
     width: int
     height: int
     fps: int
+    quality_profile: str
+    model_profile: str
 
 
 class DistributedSegmentContext(Protocol):
@@ -59,9 +61,14 @@ class DistributedSegmentGenerationService:
         self._settings = settings or get_settings()
         self._manager = runpod_manager or RunPodManager(self._settings)
 
-    def available_healthy_idle_pod_count(self, *, limit: int | None = None) -> int:
+    def available_healthy_idle_pod_count(
+        self,
+        *,
+        quality_profile: str = "480p",
+        limit: int | None = None,
+    ) -> int:
         count = 0
-        for pod in self._idle_candidates(limit=limit):
+        for pod in self._idle_candidates(quality_profile=quality_profile, limit=limit):
             if pod.base_url and self._manager._healthcheck(pod.base_url):  # noqa: SLF001
                 count += 1
                 if limit is not None and count >= limit:
@@ -143,7 +150,10 @@ class DistributedSegmentGenerationService:
                         break
                     if scheduled_any:
                         continue
-                    self._wait_for_available_pod(context.job_id)
+                    self._wait_for_available_pod(
+                        context.job_id,
+                        quality_profile=context.quality_profile,
+                    )
                     continue
 
                 done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
@@ -234,7 +244,7 @@ class DistributedSegmentGenerationService:
             segment.segment_index,
             segment.duration_seconds,
             segment.frame_count,
-            self._settings.comfyui_model_profile_normalized,
+            context.model_profile,
         )
         image_upload = client.upload_image(
             input_image_path,
@@ -259,7 +269,7 @@ class DistributedSegmentGenerationService:
             fps=context.fps,
             frame_count=segment.frame_count,
             filename_prefix=filename_prefix,
-            model_profile=self._settings.comfyui_model_profile_normalized,
+            model_profile=context.model_profile,
         )
         prompt_id = client.queue_prompt(prompt)
         self._mark_segment_generating(segment.id, prompt_id)
@@ -298,7 +308,7 @@ class DistributedSegmentGenerationService:
         )
 
     def _reserve_endpoint(self, job_id: UUID) -> ManagedComfyUIEndpoint | None:
-        for pod in self._idle_candidates():
+        for pod in self._idle_candidates(quality_profile=context.quality_profile):
             if pod.base_url is None:
                 continue
             if not self._manager._healthcheck(pod.base_url):  # noqa: SLF001
@@ -327,7 +337,12 @@ class DistributedSegmentGenerationService:
             return None
         return endpoint
 
-    def _idle_candidates(self, *, limit: int | None = None) -> list[RunpodPod]:
+    def _idle_candidates(
+        self,
+        *,
+        quality_profile: str = "480p",
+        limit: int | None = None,
+    ) -> list[RunpodPod]:
         with get_worker_session() as session:
             statement = (
                 select(RunpodPod)
@@ -341,11 +356,16 @@ class DistributedSegmentGenerationService:
                 )
                 .order_by(RunpodPod.updated_at.asc())
             )
-            if limit is not None:
-                statement = statement.limit(limit)
             pods = list(session.execute(statement).scalars())
             session.commit()
-            return pods
+            compatible_pods = [
+                pod
+                for pod in pods
+                if self._manager.pod_supports_quality(pod, quality_profile)
+            ]
+            if limit is not None:
+                return compatible_pods[:limit]
+            return compatible_pods
 
     def _next_attempt(self, segment_id: UUID) -> int:
         with get_worker_session() as session:
@@ -435,10 +455,13 @@ class DistributedSegmentGenerationService:
                 "Distributed pod failure release failed pod_id=%s", endpoint.runpod_pod_id
             )
 
-    def _wait_for_available_pod(self, job_id: UUID) -> None:
+    def _wait_for_available_pod(self, job_id: UUID, *, quality_profile: str) -> None:
         deadline = time.monotonic() + max(self._settings.runpod_queue_retry_seconds, 1)
         while time.monotonic() < deadline:
-            if self.available_healthy_idle_pod_count(limit=1) > 0:
+            if self.available_healthy_idle_pod_count(
+                quality_profile=quality_profile,
+                limit=1,
+            ) > 0:
                 return
             time.sleep(min(5, max(deadline - time.monotonic(), 0)))
         raise RuntimeError(f"No idle RunPod pod became available for distributed job {job_id}")

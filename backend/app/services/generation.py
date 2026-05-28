@@ -9,7 +9,11 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.formats import AVAILABLE_GENERATION_FORMATS, is_available_format
+from backend.app.core.formats import (
+    available_formats_for_quality,
+    default_format_for_quality,
+    is_available_format,
+)
 from backend.app.models.generation_job import GenerationJob
 from backend.app.models.generation_segment import GenerationSegment
 from backend.app.models.uploaded_file import UploadedFile
@@ -50,6 +54,7 @@ class DraftSummary:
     audio_duration_seconds: Decimal
     segments_count: int
     fps: int
+    quality_profile: str
     price_usd: Decimal
     available_formats: list[GenerationFormatDto]
 
@@ -62,6 +67,7 @@ class FormatSummary:
     width: int
     height: int
     fps: int
+    quality_profile: str
     audio_duration_seconds: Decimal
     segments_count: int
     price_usd: Decimal
@@ -100,6 +106,7 @@ class GenerationService:
         telegram_id: int,
         image: FilePayload,
         audio: FilePayload,
+        quality_profile: str = "480p",
     ) -> DraftSummary:
         self._validate_size(image.content, self._settings.max_image_size_mb, "image_too_large")
         self._validate_size(audio.content, self._settings.max_audio_size_mb, "audio_too_large")
@@ -115,7 +122,12 @@ class GenerationService:
                 self._settings.generation_max_segment_seconds,
                 self._settings.generation_fps,
             )
-            price = self._pricing_service.calculate_job_price(duration)
+            quality = self._pricing_service.normalize_quality_profile(quality_profile)
+            default_format = default_format_for_quality(quality)
+            price = self._pricing_service.calculate_job_price(
+                duration,
+                quality_profile=quality,
+            )
 
             async with self._session.begin():
                 user = await self._get_active_user(telegram_id)
@@ -141,8 +153,9 @@ class GenerationService:
                     source_image_file_id=image_file.id,
                     source_audio_file_id=audio_file.id,
                     fps=self._settings.generation_fps,
-                    width=480,
-                    height=480,
+                    width=default_format.width,
+                    height=default_format.height,
+                    quality_profile=quality,
                     audio_duration_seconds=duration,
                     segments_count=len(segment_plans),
                     price_usd=price,
@@ -157,6 +170,7 @@ class GenerationService:
                             plan=plan,
                             image_file_id=image_file.id,
                             audio_file_id=audio_file.id,
+                            quality_profile=quality,
                         )
                     )
 
@@ -171,10 +185,11 @@ class GenerationService:
                     audio_duration_seconds=duration,
                     segments_count=len(segment_plans),
                     fps=job.fps,
+                    quality_profile=quality,
                     price_usd=price,
                     available_formats=[
                         GenerationFormatDto(item.label, item.width, item.height)
-                        for item in AVAILABLE_GENERATION_FORMATS
+                        for item in available_formats_for_quality(quality)
                     ],
                 )
         finally:
@@ -200,16 +215,51 @@ class GenerationService:
         width: int,
         height: int,
     ) -> FormatSummary:
-        if not is_available_format(width, height):
-            raise AppError("Unsupported generation format", code="unsupported_generation_format")
+        async with self._session.begin():
+            user = await self._get_active_user(telegram_id)
+            job = await self._get_owned_job(job_id, user.id, for_update=True)
+            if job.status != JobStatus.DRAFT.value:
+                raise AppError("Only draft jobs can be edited", code="job_not_editable")
+            if not is_available_format(width, height, job.quality_profile):
+                raise AppError(
+                    "Unsupported generation format",
+                    code="unsupported_generation_format",
+                )
+            job.width = width
+            job.height = height
+            return await self._format_summary(job)
+
+    async def update_draft_quality(
+        self,
+        *,
+        job_id: UUID,
+        telegram_id: int,
+        quality_profile: str,
+    ) -> FormatSummary:
+        quality = self._pricing_service.normalize_quality_profile(quality_profile)
 
         async with self._session.begin():
             user = await self._get_active_user(telegram_id)
             job = await self._get_owned_job(job_id, user.id, for_update=True)
             if job.status != JobStatus.DRAFT.value:
                 raise AppError("Only draft jobs can be edited", code="job_not_editable")
-            job.width = width
-            job.height = height
+            if job.audio_duration_seconds is None:
+                raise AppError("Draft is incomplete", code="incomplete_draft")
+
+            job.quality_profile = quality
+            if not is_available_format(job.width, job.height, quality):
+                default_format = default_format_for_quality(quality)
+                job.width = default_format.width
+                job.height = default_format.height
+            job.price_usd = self._pricing_service.calculate_job_price(
+                job.audio_duration_seconds,
+                quality_profile=quality,
+            )
+            for segment in job.segments:
+                segment.price_usd = self._pricing_service.calculate_segment_price(
+                    segment.duration_seconds,
+                    quality_profile=quality,
+                )
             return await self._format_summary(job)
 
     async def confirm_draft(self, *, job_id: UUID, telegram_id: int) -> ConfirmationSummary:
@@ -367,6 +417,7 @@ class GenerationService:
         plan: SegmentPlan,
         image_file_id: UUID,
         audio_file_id: UUID,
+        quality_profile: str,
     ) -> GenerationSegment:
         return GenerationSegment(
             job_id=job_id,
@@ -376,7 +427,10 @@ class GenerationService:
             audio_end_seconds=plan.end_seconds,
             duration_seconds=plan.duration_seconds,
             frame_count=plan.frame_count,
-            price_usd=self._pricing_service.calculate_segment_price(plan.duration_seconds),
+            price_usd=self._pricing_service.calculate_segment_price(
+                plan.duration_seconds,
+                quality_profile=quality_profile,
+            ),
             input_audio_file_id=audio_file_id,
             input_image_file_id=image_file_id,
         )
@@ -391,6 +445,7 @@ class GenerationService:
             width=job.width,
             height=job.height,
             fps=job.fps,
+            quality_profile=job.quality_profile,
             audio_duration_seconds=job.audio_duration_seconds,
             segments_count=job.segments_count,
             price_usd=job.price_usd,

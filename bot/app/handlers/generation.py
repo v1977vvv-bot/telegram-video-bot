@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from io import BytesIO
 from uuid import UUID
 
@@ -16,6 +16,7 @@ from bot.app.keyboards.main_menu import (
     cancel_keyboard,
     generation_confirm_keyboard,
     generation_formats_keyboard,
+    generation_quality_keyboard,
     main_menu_keyboard,
     top_up_amounts_keyboard,
 )
@@ -36,6 +37,7 @@ backend_client = BotBackendClient()
 class GenerationStates(StatesGroup):
     waiting_for_image = State()
     waiting_for_audio = State()
+    choosing_quality = State()
     choosing_format = State()
     confirming = State()
 
@@ -129,11 +131,56 @@ async def handle_generation_audio(message: Message, state: FSMContext, bot: Bot)
         audio_duration_seconds=str(draft.audio_duration_seconds),
         segments_count=draft.segments_count,
         fps=draft.fps,
+        quality_profile=draft.quality_profile,
         price_usd=str(draft.price_usd),
         display_name=draft.display_name,
     )
+    await state.set_state(GenerationStates.choosing_quality)
+    await message.answer(
+        "Выберите качество видео:\n\n"
+        f"Аудио: {_duration(draft.audio_duration_seconds)}\n"
+        "480p — быстрее и дешевле\n"
+        "720p — выше качество, доступно на premium GPU",
+        reply_markup=generation_quality_keyboard(),
+    )
+
+
+@router.callback_query(GenerationStates.choosing_quality, F.data.startswith("generation_quality:"))
+async def handle_generation_quality(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.from_user is None or callback.data is None:
+        return
+
+    _, quality_profile = callback.data.split(":", maxsplit=1)
+    data = await state.get_data()
+    job_id = UUID(str(data["job_id"]))
+    try:
+        summary = await backend_client.set_generation_quality(
+            job_id=job_id,
+            telegram_id=callback.from_user.id,
+            quality_profile=quality_profile,
+        )
+    except (BackendUnavailableError, BackendClientError) as exc:
+        await callback.message.answer(_format_backend_error(exc))  # type: ignore[union-attr]
+        await callback.answer()
+        return
+
+    await state.update_data(
+        quality_profile=summary.quality_profile,
+        price_usd=str(summary.price_usd),
+        width=summary.width,
+        height=summary.height,
+        display_name=summary.display_name,
+    )
     await state.set_state(GenerationStates.choosing_format)
-    await message.answer("Выберите формат видео:", reply_markup=generation_formats_keyboard())
+    await callback.message.answer(  # type: ignore[union-attr]
+        "Качество выбрано:\n\n"
+        f"Quality: {summary.quality_profile}\n"
+        f"Duration: {_duration(summary.audio_duration_seconds)}\n"
+        f"Price: {_money(summary.price_usd)}\n\n"
+        "Выберите формат видео:",
+        reply_markup=generation_formats_keyboard(summary.quality_profile),
+    )
+    await callback.answer()
 
 
 @router.callback_query(GenerationStates.choosing_format, F.data.startswith("generation_format:"))
@@ -159,12 +206,17 @@ async def handle_generation_format(callback: CallbackQuery, state: FSMContext) -
     await state.update_data(
         width=summary.width,
         height=summary.height,
+        quality_profile=summary.quality_profile,
         display_name=summary.display_name,
+        price_usd=str(summary.price_usd),
     )
     await state.set_state(GenerationStates.confirming)
     await callback.message.answer(  # type: ignore[union-attr]
         _format_confirmation(summary),
-        reply_markup=generation_confirm_keyboard(),
+        reply_markup=generation_confirm_keyboard(
+            quality_profile=summary.quality_profile,
+            price_usd=summary.price_usd,
+        ),
     )
     await callback.answer()
 
@@ -204,10 +256,12 @@ async def handle_generation_confirm(callback: CallbackQuery, state: FSMContext) 
 
     await state.clear()
     display_name = safe_html(result.display_name, max_len=90)
+    quality_profile = str(data.get("quality_profile") or "480p")
     if result.billing_account_type == "business":
         text = (
             "✅ Генерация запущена.\n\n"
             f"Видео: {display_name}\n"
+            f"Качество: {quality_profile}\n"
             f"Заморожено на балансе компании: {_money(result.price_usd)}\n\n"
             "Мы пришлём результат, когда видео будет готово.\n\n"
             "Если серверу нужно подготовить модели, первый запуск может занять дольше обычного."
@@ -216,6 +270,7 @@ async def handle_generation_confirm(callback: CallbackQuery, state: FSMContext) 
         text = (
             "✅ Генерация запущена.\n\n"
             f"Видео: {display_name}\n"
+            f"Качество: {quality_profile}\n"
             f"Заморожено: {_money(result.price_usd)}\n\n"
             "Мы пришлём результат, когда видео будет готово.\n\n"
             "Если серверу нужно подготовить модели, первый запуск может занять дольше обычного."
@@ -308,6 +363,7 @@ def _format_confirmation(summary: GenerationFormatSummaryDto) -> str:
     return (
         "Проверьте данные:\n\n"
         f"Видео: {safe_html(summary.display_name, max_len=90)}\n"
+        f"Качество: {summary.quality_profile}\n"
         f"Аудио: {_duration(summary.audio_duration_seconds)}\n"
         f"Стоимость: {_money(summary.price_usd)}\n\n"
         "Средства будут заморожены до завершения генерации.\n\n"
@@ -316,11 +372,20 @@ def _format_confirmation(summary: GenerationFormatSummaryDto) -> str:
 
 
 def _money(value: Decimal) -> str:
-    return f"${value.quantize(Decimal('0.01'))}"
+    amount = value.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+    text = format(amount, "f").rstrip("0").rstrip(".")
+    if "." not in text:
+        text = f"{text}.00"
+    elif len(text.rsplit(".", maxsplit=1)[1]) == 1:
+        text = f"{text}0"
+    return f"${text}"
 
 
 def _duration(value: Decimal) -> str:
-    return f"{value.quantize(Decimal('0.1'))} сек"
+    rounded = value.quantize(Decimal("0.1"))
+    if rounded == rounded.to_integral_value():
+        return f"{int(rounded)} сек"
+    return f"{rounded} сек"
 
 
 def _format_backend_error(exc: Exception, *, file_kind: str | None = None) -> str:

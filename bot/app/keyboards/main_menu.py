@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from aiogram.types import (
     InlineKeyboardButton,
@@ -78,34 +78,84 @@ def cancel_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def generation_formats_keyboard() -> InlineKeyboardMarkup:
+def generation_quality_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
-            InlineKeyboardButton(
-                text="↔️ Горизонтальное 854×480",
-                callback_data="generation_format:854:480",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="◼️ Квадратное 480×480",
-                callback_data="generation_format:480:480",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="↕️ Вертикальное 480×854",
-                callback_data="generation_format:480:854",
-            )
+            InlineKeyboardButton(text="480p", callback_data="generation_quality:480p"),
+            InlineKeyboardButton(text="720p", callback_data="generation_quality:720p"),
         ],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="generation_cancel")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def generation_confirm_keyboard() -> InlineKeyboardMarkup:
+def generation_formats_keyboard(quality_profile: str = "480p") -> InlineKeyboardMarkup:
+    if quality_profile == "720p":
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    text="↔️ Горизонтальное 1280×720",
+                    callback_data="generation_format:1280:720",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◼️ Квадратное 720×720",
+                    callback_data="generation_format:720:720",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↕️ Вертикальное 720×1280",
+                    callback_data="generation_format:720:1280",
+                )
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="generation_cancel")],
+        ]
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    text="↔️ Горизонтальное 854×480",
+                    callback_data="generation_format:854:480",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◼️ Квадратное 480×480",
+                    callback_data="generation_format:480:480",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↕️ Вертикальное 480×854",
+                    callback_data="generation_format:480:854",
+                )
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="generation_cancel")],
+        ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def generation_confirm_keyboard(
+    *,
+    quality_profile: str | None = None,
+    price_usd: Decimal | None = None,
+) -> InlineKeyboardMarkup:
+    label = "✅ Запустить"
+    if quality_profile and price_usd is not None:
+        amount = (
+            format(price_usd.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP), "f")
+            .rstrip("0")
+            .rstrip(".")
+        )
+        if "." not in amount:
+            amount = f"{amount}.00"
+        elif len(amount.rsplit(".", maxsplit=1)[1]) == 1:
+            amount = f"{amount}0"
+        label = f"✅ Запустить {quality_profile} — ${amount}"
     keyboard = [
-        [InlineKeyboardButton(text="✅ Запустить", callback_data="generation_confirm")],
+        [InlineKeyboardButton(text=label, callback_data="generation_confirm")],
         [InlineKeyboardButton(text="↩️ Назад", callback_data="generation_cancel")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)

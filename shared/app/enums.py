@@ -52,6 +52,11 @@ class GenerationMode(StrEnum):
     COMFYUI = "comfyui"
 
 
+class VideoQuality(StrEnum):
+    P480 = "480p"
+    P720 = "720p"
+
+
 class SegmentImageStrategy(StrEnum):
     LAST_FRAME = "last_frame"
     SOURCE_IMAGE = "source_image"

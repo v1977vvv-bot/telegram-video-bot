@@ -16,6 +16,7 @@ class GenerationDraftResponse(BaseModel):
     audio_duration_seconds: Decimal
     segments_count: int
     fps: int
+    quality_profile: str
     price_usd: Decimal
     available_formats: list[AvailableFormatResponse]
 
@@ -33,9 +34,15 @@ class GenerationFormatResponse(BaseModel):
     width: int
     height: int
     fps: int
+    quality_profile: str
     audio_duration_seconds: Decimal
     segments_count: int
     price_usd: Decimal
+
+
+class GenerationQualityRequest(BaseModel):
+    telegram_id: int = Field(gt=0)
+    quality_profile: str
 
 
 class TelegramUserJobRequest(BaseModel):
@@ -67,6 +74,7 @@ class GenerationJobDetailResponse(BaseModel):
     width: int
     height: int
     fps: int
+    quality_profile: str
     audio_duration_seconds: Decimal | None
     segments_count: int
     price_usd: Decimal | None

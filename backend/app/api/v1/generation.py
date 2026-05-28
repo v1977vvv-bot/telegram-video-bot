@@ -12,6 +12,7 @@ from backend.app.schemas.generation import (
     GenerationFormatRequest,
     GenerationFormatResponse,
     GenerationJobDetailResponse,
+    GenerationQualityRequest,
     GenerationSegmentDetailResponse,
     TelegramUserJobRequest,
 )
@@ -24,6 +25,7 @@ router = APIRouter(prefix="/generation", tags=["generation"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 TelegramIdForm = Annotated[int, Form(gt=0)]
+QualityProfileForm = Annotated[str | None, Form()]
 UploadFileDep = Annotated[UploadFile, File()]
 TelegramIdQuery = Annotated[int, Query(gt=0)]
 
@@ -34,9 +36,11 @@ async def create_generation_draft(
     telegram_id: TelegramIdForm,
     image: UploadFileDep,
     audio: UploadFileDep,
+    quality_profile: QualityProfileForm = None,
 ) -> GenerationDraftResponse:
     summary = await GenerationService(session).create_draft(
         telegram_id=telegram_id,
+        quality_profile=quality_profile or "480p",
         image=FilePayload(
             original_filename=image.filename or "image",
             content=await image.read(),
@@ -55,6 +59,7 @@ async def create_generation_draft(
         audio_duration_seconds=summary.audio_duration_seconds,
         segments_count=summary.segments_count,
         fps=summary.fps,
+        quality_profile=summary.quality_profile,
         price_usd=summary.price_usd,
         available_formats=[
             AvailableFormatResponse(label=item.label, width=item.width, height=item.height)
@@ -82,6 +87,32 @@ async def update_generation_format(
         width=summary.width,
         height=summary.height,
         fps=summary.fps,
+        quality_profile=summary.quality_profile,
+        audio_duration_seconds=summary.audio_duration_seconds,
+        segments_count=summary.segments_count,
+        price_usd=summary.price_usd,
+    )
+
+
+@router.patch("/drafts/{job_id}/quality", response_model=GenerationFormatResponse)
+async def update_generation_quality(
+    job_id: UUID,
+    payload: GenerationQualityRequest,
+    session: SessionDep,
+) -> GenerationFormatResponse:
+    summary = await GenerationService(session).update_draft_quality(
+        job_id=job_id,
+        telegram_id=payload.telegram_id,
+        quality_profile=payload.quality_profile,
+    )
+    return GenerationFormatResponse(
+        job_id=summary.job_id,
+        display_name=summary.display_name,
+        status=summary.status,
+        width=summary.width,
+        height=summary.height,
+        fps=summary.fps,
+        quality_profile=summary.quality_profile,
         audio_duration_seconds=summary.audio_duration_seconds,
         segments_count=summary.segments_count,
         price_usd=summary.price_usd,
@@ -148,6 +179,7 @@ async def get_generation_job(
         width=job.width,
         height=job.height,
         fps=job.fps,
+        quality_profile=job.quality_profile,
         audio_duration_seconds=job.audio_duration_seconds,
         segments_count=job.segments_count,
         price_usd=job.price_usd,

@@ -163,7 +163,11 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "runpod_discovery_starting_healthcheck_timeout_minutes": 120,
         "runpod_allowed_gpu_type_list": ["NVIDIA L40S"],
         "runpod_fallback_allowed_gpu_type_list": [],
+        "runpod_cheap_allowed_gpu_type_list": [],
+        "runpod_premium_allowed_gpu_type_list": [],
         "runpod_template_id": "template-1",
+        "runpod_cheap_template_id": "",
+        "runpod_effective_premium_template_id": "template-1",
         "runpod_comfyui_port": 8188,
     }
     values.update(overrides)

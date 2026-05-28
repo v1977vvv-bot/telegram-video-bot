@@ -25,6 +25,7 @@ from shared.app.enums import (
     JobStatus,
     SegmentImageStrategy,
     SegmentStatus,
+    VideoQuality,
 )
 from shared.app.job_names import build_job_display_name
 from worker.app.celery_app import celery_app
@@ -66,6 +67,8 @@ class ComfyUIJobContext:
     width: int
     height: int
     fps: int
+    quality_profile: str
+    model_profile: str
     audio_duration_seconds: Decimal
     segments: list[ComfyUISegmentContext]
 
@@ -557,6 +560,7 @@ def _distributed_parallelism_or_none(
         max(settings.distributed_max_parallel_segments_per_job, 1),
     )
     healthy_idle_pods = distributed_service.available_healthy_idle_pod_count(
+        quality_profile=context.quality_profile,
         limit=desired_parallelism,
     )
     if settings.distributed_require_warm_pods and healthy_idle_pods < desired_parallelism:
@@ -881,6 +885,8 @@ def _context_from_job(job: GenerationJob) -> ComfyUIJobContext:
         width=job.width,
         height=job.height,
         fps=job.fps,
+        quality_profile=_job_quality_profile(job),
+        model_profile=_model_profile_for_quality(get_settings(), _job_quality_profile(job)),
         audio_duration_seconds=job.audio_duration_seconds,
         segments=[
             ComfyUISegmentContext(
@@ -894,6 +900,19 @@ def _context_from_job(job: GenerationJob) -> ComfyUIJobContext:
             for segment in job.segments
         ],
     )
+
+
+def _job_quality_profile(job: GenerationJob) -> str:
+    quality = (getattr(job, "quality_profile", None) or VideoQuality.P480.value).strip().lower()
+    if quality == VideoQuality.P720.value:
+        return VideoQuality.P720.value
+    return VideoQuality.P480.value
+
+
+def _model_profile_for_quality(settings: Settings, quality_profile: str) -> str:
+    if quality_profile == VideoQuality.P720.value:
+        return settings.runpod_720p_model_profile.strip() or settings.comfyui_model_profile_normalized
+    return settings.runpod_480p_model_profile.strip() or settings.comfyui_model_profile_normalized
 
 
 def _validate_audio_segments(
@@ -1063,12 +1082,13 @@ def _generate_comfyui_segment(
 ) -> Path:
     logger.info(
         "Segment generation started job_id=%s segment_index=%s duration=%s "
-        "frame_count=%s model_profile=%s",
+        "frame_count=%s quality=%s model_profile=%s",
         context.job_id,
         segment.segment_index,
         segment.duration_seconds,
         segment.frame_count,
-        settings.comfyui_model_profile_normalized,
+        context.quality_profile,
+        context.model_profile,
     )
     image_upload = client.upload_image(
         input_image_path,
@@ -1093,7 +1113,7 @@ def _generate_comfyui_segment(
         fps=context.fps,
         frame_count=segment.frame_count,
         filename_prefix=filename_prefix,
-        model_profile=settings.comfyui_model_profile_normalized,
+        model_profile=context.model_profile,
     )
     prompt_id = client.queue_prompt(prompt)
     logger.info(

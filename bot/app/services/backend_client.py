@@ -111,6 +111,7 @@ class GenerationDraftDto:
     audio_duration_seconds: Decimal
     segments_count: int
     fps: int
+    quality_profile: str
     price_usd: Decimal
     available_formats: list[GenerationFormatDto]
 
@@ -123,6 +124,7 @@ class GenerationFormatSummaryDto:
     width: int
     height: int
     fps: int
+    quality_profile: str
     audio_duration_seconds: Decimal
     segments_count: int
     price_usd: Decimal
@@ -260,11 +262,15 @@ class BotBackendClient:
         audio_content: bytes,
         audio_filename: str,
         audio_mime_type: str,
+        quality_profile: str | None = None,
     ) -> GenerationDraftDto:
+        form_data = {"telegram_id": str(telegram_id)}
+        if quality_profile is not None:
+            form_data["quality_profile"] = quality_profile
         data = await self._request(
             "POST",
             "/api/v1/generation/drafts",
-            data={"telegram_id": str(telegram_id)},
+            data=form_data,
             files={
                 "image": (image_filename, image_content, image_mime_type),
                 "audio": (audio_filename, audio_content, audio_mime_type),
@@ -277,6 +283,7 @@ class BotBackendClient:
             audio_duration_seconds=Decimal(str(data["audio_duration_seconds"])),
             segments_count=int(data["segments_count"]),
             fps=int(data["fps"]),
+            quality_profile=str(data.get("quality_profile") or "480p"),
             price_usd=Decimal(str(data["price_usd"])),
             available_formats=[
                 GenerationFormatDto(
@@ -286,6 +293,31 @@ class BotBackendClient:
                 )
                 for item in data["available_formats"]
             ],
+        )
+
+    async def set_generation_quality(
+        self,
+        *,
+        job_id: UUID,
+        telegram_id: int,
+        quality_profile: str,
+    ) -> GenerationFormatSummaryDto:
+        data = await self._request(
+            "PATCH",
+            f"/api/v1/generation/drafts/{job_id}/quality",
+            json={"telegram_id": telegram_id, "quality_profile": quality_profile},
+        )
+        return GenerationFormatSummaryDto(
+            job_id=UUID(data["job_id"]),
+            display_name=str(data.get("display_name") or "Видео"),
+            status=str(data["status"]),
+            width=int(data["width"]),
+            height=int(data["height"]),
+            fps=int(data["fps"]),
+            quality_profile=str(data.get("quality_profile") or "480p"),
+            audio_duration_seconds=Decimal(str(data["audio_duration_seconds"])),
+            segments_count=int(data["segments_count"]),
+            price_usd=Decimal(str(data["price_usd"])),
         )
 
     async def set_generation_format(
@@ -308,6 +340,7 @@ class BotBackendClient:
             width=int(data["width"]),
             height=int(data["height"]),
             fps=int(data["fps"]),
+            quality_profile=str(data.get("quality_profile") or "480p"),
             audio_duration_seconds=Decimal(str(data["audio_duration_seconds"])),
             segments_count=int(data["segments_count"]),
             price_usd=Decimal(str(data["price_usd"])),

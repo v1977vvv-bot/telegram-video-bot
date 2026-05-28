@@ -298,17 +298,26 @@ class RunPodDiscoveryService:
             for gpu_type in (
                 self._settings.runpod_allowed_gpu_type_list
                 + self._settings.runpod_fallback_allowed_gpu_type_list
+                + self._settings.runpod_cheap_allowed_gpu_type_list
+                + self._settings.runpod_premium_allowed_gpu_type_list
             )
         }
         if allowed_gpus and (pod_info.gpu_type or "").lower() not in allowed_gpus:
             return "gpu_not_allowed"
 
-        configured_template_id = self._settings.runpod_template_id.strip()
+        configured_template_ids = {
+            template_id
+            for template_id in (
+                self._settings.runpod_template_id.strip(),
+                self._settings.runpod_cheap_template_id.strip(),
+                self._settings.runpod_effective_premium_template_id,
+            )
+            if template_id and template_id != "change_me"
+        }
         if (
             pod_info.template_id
-            and configured_template_id
-            and configured_template_id != "change_me"
-            and pod_info.template_id != configured_template_id
+            and configured_template_ids
+            and pod_info.template_id not in configured_template_ids
         ):
             return "template_mismatch"
 
