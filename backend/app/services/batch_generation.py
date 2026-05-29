@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -177,7 +178,7 @@ class BatchGenerationService:
             total_duration_seconds=total_duration,
             total_price_usd=total_price,
         )
-        async with self._session.begin():
+        async with _session_transaction(self._session):
             self._session.add(batch)
             await self._session.flush()
             storage = self._get_storage_service()
@@ -238,7 +239,7 @@ class BatchGenerationService:
 
     async def confirm_batch(self, *, user_id: UUID, batch_id: UUID) -> BatchDraftSummary:
         job_ids: list[UUID] = []
-        async with self._session.begin():
+        async with _session_transaction(self._session):
             batch = await self._get_batch(batch_id)
             if batch.user_id != user_id:
                 raise AppError(
@@ -504,6 +505,21 @@ class BatchGenerationService:
 
         enqueue_generation_job(str(job_id))
 
+
+
+@asynccontextmanager
+async def _session_transaction(session: AsyncSession):
+    """Use an existing transaction safely, or create a new one."""
+    if session.in_transaction():
+        try:
+            yield
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+    else:
+        async with session.begin():
+            yield
 
 def _mime_type_for_filename(filename: str) -> str | None:
     extension = Path(filename).suffix.casefold()

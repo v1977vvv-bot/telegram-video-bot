@@ -13,6 +13,7 @@ from backend.app.db.base import Base, TimestampMixin
 if TYPE_CHECKING:
     from backend.app.models.balance_account import BalanceAccount
     from backend.app.models.balance_transaction import BalanceTransaction
+    from backend.app.models.batch_upload_session import BatchUploadSession
     from backend.app.models.business_account_member import BusinessAccountMember
     from backend.app.models.generation_batch import GenerationBatch
     from backend.app.models.generation_job import GenerationJob
@@ -43,6 +44,11 @@ class User(TimestampMixin, Base):
     generation_batches: Mapped[list[GenerationBatch]] = relationship(
         "GenerationBatch",
         back_populates="user",
+    )
+    batch_upload_sessions: Mapped[list[BatchUploadSession]] = relationship(
+        "BatchUploadSession",
+        back_populates="user",
+        cascade="all, delete-orphan",
     )
     uploaded_files: Mapped[list[UploadedFile]] = relationship(
         "UploadedFile",

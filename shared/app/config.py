@@ -256,6 +256,7 @@ class Settings(BaseSettings):
     max_image_size_mb: int = 20
     max_audio_size_mb: int = 100
     generation_max_audio_seconds: int = 1800
+    batch_web_upload_max_mb: int = 500
     debug_admin_telegram_ids: str = ""
 
     @computed_field  # type: ignore[prop-decorator]
