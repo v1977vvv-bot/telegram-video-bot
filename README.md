@@ -240,6 +240,39 @@ The top-up menu remains the personal fixed-package flow through the configured
 payment provider; users with business balance see a note that company top-ups are
 handled through support.
 
+## Batch ZIP upload through Telegram Web App
+
+The regular Telegram batch flow still accepts small `.zip` files as documents. For
+large archives, the bot can create a short-lived direct upload session and open a
+Telegram Web App at:
+
+```text
+{BACKEND_PUBLIC_URL}/batch-upload/?token=...
+```
+
+The Web App uploads the archive directly to the backend, so it avoids Telegram Bot
+API file download limits. The backend stores only a SHA-256 token hash in
+`batch_upload_sessions`; the plain token is only sent in the Web App URL. Optional
+Telegram WebApp `initData` is verified with `TELEGRAM_BOT_TOKEN` when present, and
+the batch user is always resolved from the upload session, not from frontend data.
+
+Relevant settings:
+
+```env
+BACKEND_PUBLIC_URL=https://YOUR_DOMAIN
+BATCH_WEB_UPLOAD_MAX_MB=500
+```
+
+User flow:
+
+1. Open `📦 Пакетная генерация`.
+2. Press `🌐 Загрузить большой архив`, or send a `.zip` larger than Telegram direct
+   download limits and follow the Web App button.
+3. In the Web App, choose `480p` or `720p`, upload the `.zip`, check the summary, and
+   launch the batch.
+4. Completed videos are delivered individually by the existing generation completion
+   flow.
+
 ## Admin panel MVP
 
 Stage 11.1 adds a read-only operator dashboard and read-only admin API. It is disabled

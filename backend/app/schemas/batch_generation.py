@@ -15,6 +15,19 @@ class BatchConfirmRequest(BaseModel):
     telegram_id: int
 
 
+class BatchUploadSessionRequest(BaseModel):
+    telegram_id: int
+
+
+class BatchUploadSessionResponse(BaseModel):
+    web_app_url: str
+
+
+class BatchWebConfirmRequest(BaseModel):
+    token: str
+    batch_id: UUID
+
+
 class BatchDraftErrorResponse(BaseModel):
     code: str
     message: str

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 from typing import Annotated
 from uuid import UUID
 
@@ -13,6 +14,9 @@ from backend.app.schemas.batch_generation import (
     BatchDraftErrorResponse,
     BatchDraftItemResponse,
     BatchDraftResponse,
+    BatchUploadSessionRequest,
+    BatchUploadSessionResponse,
+    BatchWebConfirmRequest,
 )
 from backend.app.schemas.generation import (
     GenerationConfirmResponse,
@@ -26,10 +30,15 @@ from backend.app.schemas.generation import (
 )
 from backend.app.schemas.settings import AvailableFormatResponse
 from backend.app.services.batch_generation import BatchDraftSummary, BatchGenerationService
+from backend.app.services.batch_upload_sessions import (
+    BatchUploadSessionService,
+    validate_telegram_webapp_init_data,
+)
 from backend.app.services.generation import FilePayload, GenerationService
 from backend.app.workers.celery_client import enqueue_generation_job
-from shared.app.exceptions import AppError
+from shared.app.config import get_settings
 from shared.app.database import get_session
+from shared.app.exceptions import AppError
 
 router = APIRouter(prefix="/generation", tags=["generation"])
 
@@ -38,6 +47,8 @@ TelegramIdForm = Annotated[int, Form(gt=0)]
 QualityProfileForm = Annotated[str | None, Form()]
 UploadFileDep = Annotated[UploadFile, File()]
 TelegramIdQuery = Annotated[int, Query(gt=0)]
+TokenForm = Annotated[str, Form()]
+InitDataForm = Annotated[str | None, Form()]
 
 
 @router.post("/drafts", response_model=GenerationDraftResponse)
@@ -85,7 +96,8 @@ async def create_generation_batch_draft(
     archive: UploadFileDep,
     quality_profile: QualityProfileForm = None,
 ) -> BatchDraftResponse:
-    user = await _get_active_user(session, telegram_id)
+    async with session.begin():
+        user = await _get_active_user(session, telegram_id)
     summary = await BatchGenerationService(session).create_batch_draft(
         user_id=user.id,
         filename=archive.filename or "batch.zip",
@@ -95,13 +107,95 @@ async def create_generation_batch_draft(
     return _batch_response(summary, BatchDraftResponse)
 
 
+@router.post("/batches/upload-session", response_model=BatchUploadSessionResponse)
+async def create_generation_batch_upload_session(
+    payload: BatchUploadSessionRequest,
+    session: SessionDep,
+) -> BatchUploadSessionResponse:
+    async with session.begin():
+        user = await _get_active_user(session, payload.telegram_id)
+        created = await BatchUploadSessionService(session).create_session(
+            user_id=user.id,
+            telegram_id=user.telegram_id,
+        )
+    return BatchUploadSessionResponse(web_app_url=created.web_app_url)
+
+
+@router.post("/batches/web-draft", response_model=BatchDraftResponse)
+async def create_generation_batch_web_draft(
+    session: SessionDep,
+    token: TokenForm,
+    archive: UploadFileDep,
+    quality_profile: QualityProfileForm = None,
+    telegram_init_data: InitDataForm = None,
+) -> BatchDraftResponse:
+    upload_session_service = BatchUploadSessionService(session)
+    async with session.begin():
+        upload_session = await upload_session_service.validate_session_token(token)
+        upload_user_id = upload_session.user_id
+        upload_telegram_id = upload_session.telegram_id
+    _validate_optional_init_data(telegram_init_data, upload_telegram_id)
+    _validate_zip_filename(archive.filename or "batch.zip")
+    content = await _read_upload_with_limit(
+        archive,
+        max_bytes=get_settings().batch_web_upload_max_mb * 1024 * 1024,
+    )
+    summary = await BatchGenerationService(session).create_batch_draft(
+        user_id=upload_user_id,
+        filename=archive.filename or "batch.zip",
+        content=content,
+        quality_profile=quality_profile or "480p",
+    )
+    if summary.batch_id is not None:
+        async with session.begin():
+            upload_session = await upload_session_service.validate_session_token(token)
+            if upload_session.telegram_id != upload_telegram_id:
+                raise AppError("Upload session mismatch", code="batch_session_mismatch")
+            upload_session_service.validate_record(upload_session)
+            upload_session_service.link_batch(
+                upload_session,
+                summary.batch_id,
+                summary.quality_profile,
+            )
+    return _batch_response(summary, BatchDraftResponse)
+
+
+@router.post("/batches/web-confirm", response_model=BatchConfirmResponse)
+async def confirm_generation_batch_web(
+    payload: BatchWebConfirmRequest,
+    session: SessionDep,
+) -> BatchConfirmResponse:
+    upload_session_service = BatchUploadSessionService(session)
+    async with session.begin():
+        upload_session = await upload_session_service.validate_session_token(payload.token)
+        if upload_session.batch_id != payload.batch_id:
+            raise AppError("Upload session does not own this batch", code="batch_session_mismatch")
+        upload_user_id = upload_session.user_id
+    summary = await BatchGenerationService(session).confirm_batch(
+        user_id=upload_user_id,
+        batch_id=payload.batch_id,
+    )
+    if summary.batch_id is not None:
+        async with session.begin():
+            upload_session = await upload_session_service.validate_session_token(payload.token)
+            if upload_session.batch_id != summary.batch_id:
+                raise AppError(
+                    "Upload session does not own this batch",
+                    code="batch_session_mismatch",
+                )
+            upload_session_service.validate_record(upload_session)
+            upload_session_service.mark_used(upload_session, summary.batch_id)
+    return _batch_response(summary, BatchConfirmResponse)
+
+
 @router.post("/batches/{batch_id}/confirm", response_model=BatchConfirmResponse)
 async def confirm_generation_batch(
     batch_id: UUID,
     payload: TelegramUserJobRequest,
     session: SessionDep,
 ) -> BatchConfirmResponse:
-    user = await _get_active_user(session, payload.telegram_id)
+    async with session.begin():
+        user = await _get_active_user(session, payload.telegram_id)
     summary = await BatchGenerationService(session).confirm_batch(
         user_id=user.id,
         batch_id=batch_id,
@@ -299,3 +393,43 @@ def _batch_response(
         ],
         job_ids=summary.job_ids,
     )
+
+
+async def _read_upload_with_limit(upload: UploadFile, *, max_bytes: int) -> bytes:
+    buffer = BytesIO()
+    total = 0
+    while chunk := await upload.read(1024 * 1024):
+        total += len(chunk)
+        if total > max_bytes:
+            max_mb = max_bytes // (1024 * 1024)
+            raise AppError(
+                f"Archive is too large. Maximum size: {max_mb} MB.",
+                code="batch_archive_too_large",
+                status_code=413,
+            )
+        buffer.write(chunk)
+    return buffer.getvalue()
+
+
+def _validate_zip_filename(filename: str) -> None:
+    if not filename.casefold().endswith(".zip"):
+        raise AppError(
+            "Only .zip archives are supported",
+            code="unsupported_archive_type",
+            status_code=400,
+        )
+
+
+def _validate_optional_init_data(init_data: str | None, telegram_id: int) -> None:
+    if not init_data:
+        return
+    validated_telegram_id = validate_telegram_webapp_init_data(
+        init_data,
+        bot_token=get_settings().telegram_bot_token,
+    )
+    if validated_telegram_id != telegram_id:
+        raise AppError(
+            "Telegram initData user does not match upload session",
+            code="telegram_init_data_user_mismatch",
+            status_code=403,
+        )

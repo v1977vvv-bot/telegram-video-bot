@@ -449,6 +449,14 @@ class BotBackendClient:
         )
         return self._parse_batch(data)
 
+    async def create_batch_upload_session(self, *, telegram_id: int) -> str:
+        data = await self._request(
+            "POST",
+            "/api/v1/generation/batches/upload-session",
+            json={"telegram_id": telegram_id},
+        )
+        return str(data["web_app_url"])
+
     async def get_payment_packages(self) -> list[PaymentPackageDto]:
         data = await self._request("GET", "/api/v1/payments/packages")
         return [
@@ -653,8 +661,5 @@ class BotBackendClient:
                 )
                 for error in data.get("errors", [])
             ],
-            job_ids=[
-                UUID(job_id)
-                for job_id in (data.get("job_ids") or [])
-            ],
+            job_ids=[UUID(job_id) for job_id in (data.get("job_ids") or [])],
         )

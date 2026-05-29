@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Пакетная генерация</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0e1117;
+      --panel: #171b23;
+      --panel-2: #1f2530;
+      --text: #f5f7fb;
+      --muted: #9aa4b2;
+      --line: #343b48;
+      --accent: #c9ff3d;
+      --accent-pressed: #b4ee20;
+      --danger: #ff6b6b;
+      --ok: #79e69d;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(720px, 100%);
+      margin: 0 auto;
+      padding: 22px 16px 32px;
+    }
+
+    h1 {
+      margin: 0 0 18px;
+      font-size: 24px;
+      font-weight: 740;
+      letter-spacing: 0;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .upload {
+      display: grid;
+      place-items: center;
+      min-height: 210px;
+      border: 1.5px dashed var(--line);
+      border-radius: 8px;
+      background: var(--panel-2);
+      padding: 26px 18px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 160ms ease, background 160ms ease;
+    }
+
+    .upload.dragover {
+      border-color: var(--accent);
+      background: #252d39;
+    }
+
+    .icon {
+      width: 54px;
+      height: 54px;
+      margin-bottom: 16px;
+      color: var(--accent);
+    }
+
+    .upload-title {
+      font-size: 18px;
+      font-weight: 680;
+      margin-bottom: 6px;
+    }
+
+    .upload-subtitle,
+    .muted {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .file-name {
+      margin-top: 12px;
+      color: var(--ok);
+      font-size: 14px;
+      word-break: break-word;
+    }
+
+    .field {
+      margin-top: 16px;
+    }
+
+    .label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .quality {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .quality button {
+      height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-2);
+      color: var(--text);
+      font-size: 16px;
+      font-weight: 680;
+    }
+
+    .quality button.active {
+      border-color: var(--accent);
+      color: #12160a;
+      background: var(--accent);
+    }
+
+    .primary {
+      width: 100%;
+      height: 52px;
+      margin-top: 18px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #12160a;
+      font-size: 16px;
+      font-weight: 780;
+      cursor: pointer;
+    }
+
+    .primary:active {
+      background: var(--accent-pressed);
+    }
+
+    .primary:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
+    .status,
+    .summary,
+    .error {
+      margin-top: 16px;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .status {
+      background: #141a23;
+      color: var(--muted);
+    }
+
+    .summary {
+      background: #152016;
+      border: 1px solid rgba(121, 230, 157, 0.22);
+    }
+
+    .error {
+      background: #271719;
+      border: 1px solid rgba(255, 107, 107, 0.28);
+      color: #ffd0d0;
+    }
+
+    .summary h2,
+    .error h2 {
+      margin: 0 0 8px;
+      font-size: 16px;
+    }
+
+    .pairs {
+      margin: 10px 0 0;
+      padding-left: 18px;
+    }
+
+    input[type="file"] {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Пакетная генерация</h1>
+    <section class="panel">
+      <input id="fileInput" type="file" accept=".zip,application/zip">
+      <div id="uploadArea" class="upload">
+        <div>
+          <svg class="icon" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+            <path d="M15 34h18a9 9 0 0 0 1.8-17.82A12 12 0 0 0 12 19.6 7.5 7.5 0 0 0 15 34Z" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M24 31V18m0 0-5 5m5-5 5 5" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="upload-title">Загрузите .zip архив</div>
+          <div class="upload-subtitle">Перетащите файл сюда или нажмите для выбора</div>
+          <div id="fileName" class="file-name"></div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="label">Качество видео</label>
+        <div class="quality">
+          <button id="q480" type="button" class="active">480p</button>
+          <button id="q720" type="button">720p</button>
+        </div>
+      </div>
+
+      <button id="mainButton" class="primary" type="button">Выбрать архив</button>
+      <div id="status" class="status" hidden></div>
+      <div id="summary" class="summary" hidden></div>
+      <div id="error" class="error" hidden></div>
+    </section>
+  </main>
+
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+
+    const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+    const token = new URLSearchParams(window.location.search).get("token") || "";
+    const fileInput = document.getElementById("fileInput");
+    const uploadArea = document.getElementById("uploadArea");
+    const fileName = document.getElementById("fileName");
+    const mainButton = document.getElementById("mainButton");
+    const statusBox = document.getElementById("status");
+    const summaryBox = document.getElementById("summary");
+    const errorBox = document.getElementById("error");
+    const q480 = document.getElementById("q480");
+    const q720 = document.getElementById("q720");
+
+    let selectedQuality = "480p";
+    let selectedFile = null;
+    let draft = null;
+
+    function setQuality(value) {
+      selectedQuality = value;
+      q480.classList.toggle("active", value === "480p");
+      q720.classList.toggle("active", value === "720p");
+    }
+
+    function setLoading(text) {
+      mainButton.disabled = true;
+      statusBox.hidden = false;
+      statusBox.textContent = text;
+      errorBox.hidden = true;
+    }
+
+    function clearLoading() {
+      mainButton.disabled = false;
+      statusBox.hidden = true;
+      statusBox.textContent = "";
+    }
+
+    function showError(title, lines) {
+      clearLoading();
+      errorBox.hidden = false;
+      errorBox.innerHTML = `<h2>${escapeHtml(title)}</h2>${lines.map(escapeHtml).join("<br>")}`;
+    }
+
+    function setFile(file) {
+      if (!file) return;
+      if (!file.name.toLowerCase().endsWith(".zip")) {
+        showError("Ошибка", ["Загрузите архив в формате .zip"]);
+        return;
+      }
+      if (file.size > MAX_UPLOAD_BYTES) {
+        showError("Ошибка", ["Архив слишком большой. Максимальный размер: 500 MB."]);
+        return;
+      }
+      selectedFile = file;
+      draft = null;
+      summaryBox.hidden = true;
+      errorBox.hidden = true;
+      fileName.textContent = file.name;
+      mainButton.textContent = "Проверить архив";
+    }
+
+    async function createDraft() {
+      if (!token) {
+        showError("Ошибка", ["Ссылка устарела. Вернитесь в бот и создайте новую загрузку."]);
+        return;
+      }
+      if (!selectedFile) {
+        fileInput.click();
+        return;
+      }
+      setLoading("Проверяю архив и считаю стоимость...");
+      const form = new FormData();
+      form.append("token", token);
+      form.append("quality_profile", selectedQuality);
+      form.append("archive", selectedFile);
+      if (tg && tg.initData) {
+        form.append("telegram_init_data", tg.initData);
+      }
+      try {
+        const response = await fetch("/api/v1/generation/batches/web-draft", {
+          method: "POST",
+          body: form,
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(errorText(data));
+        }
+        if (data.errors && data.errors.length) {
+          showError("Ошибка", data.errors.slice(0, 20).map(readableError));
+          return;
+        }
+        draft = data;
+        renderSummary(data);
+        clearLoading();
+        mainButton.textContent = `Запустить ${data.total_jobs} видео`;
+      } catch (error) {
+        showError("Ошибка", [error.message || "Не удалось проверить архив"]);
+      }
+    }
+
+    async function confirmDraft() {
+      if (!draft || !draft.batch_id) return;
+      setLoading("Запускаю генерацию...");
+      try {
+        const response = await fetch("/api/v1/generation/batches/web-confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, batch_id: draft.batch_id }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(errorText(data));
+        }
+        clearLoading();
+        summaryBox.hidden = false;
+        summaryBox.innerHTML = "Пакетная генерация запущена. Видео будут приходить в Telegram по мере готовности.";
+        mainButton.disabled = true;
+        if (tg) {
+          tg.MainButton.hide();
+        }
+      } catch (error) {
+        showError("Ошибка", [error.message || "Не удалось запустить генерацию"]);
+      }
+    }
+
+    function renderSummary(data) {
+      const pairs = (data.items || []).slice(0, 10).map((item) => (
+        `<li>${escapeHtml(item.basename)} — ${duration(item.audio_duration_seconds)}, ${money(item.price_usd)}</li>`
+      )).join("");
+      const more = data.items.length > 10 ? `<p class="muted">... и ещё ${data.items.length - 10}</p>` : "";
+      summaryBox.hidden = false;
+      summaryBox.innerHTML = `
+        <h2>Пакет готов</h2>
+        <div>Качество: ${escapeHtml(data.quality_profile)}</div>
+        <div>Количество видео: ${data.total_jobs}</div>
+        <div>Общая длительность: ${duration(data.total_duration_seconds)}</div>
+        <div>Стоимость: ${money(data.total_price_usd)}</div>
+        <div style="margin-top:10px">Первые 10 файлов</div>
+        <ol class="pairs">${pairs}</ol>
+        ${more}
+      `;
+    }
+
+    function readableError(error) {
+      const map = {
+        duplicate_image: "Дубликат фото с таким именем",
+        duplicate_audio: "Дубликат аудио с таким именем",
+        missing_audio: "Для фото нет аудио",
+        missing_image: "Для аудио нет фото",
+        unsupported_file: "Неподдерживаемый файл",
+        unsafe_path: "Небезопасный путь внутри архива",
+        unsupported_archive_type: "Загрузите архив в формате .zip",
+        invalid_zip: "Архив повреждён или не читается",
+        audio_probe_failed: "Не удалось определить длительность аудио",
+      };
+      const file = error.filename ? ` — ${error.filename}` : "";
+      return `${map[error.code] || error.message}${file}`;
+    }
+
+    function errorText(data) {
+      const detail = data && data.detail;
+      if (typeof detail === "string") {
+        if (detail.includes("expired")) {
+          return "Ссылка устарела. Вернитесь в бот и создайте новую загрузку.";
+        }
+        if (detail.includes("too large")) {
+          return "Архив слишком большой. Максимальный размер: 500 MB.";
+        }
+        return detail;
+      }
+      const error = data && data.error;
+      if (error && typeof error.message === "string") {
+        if (error.code === "upload_session_expired") {
+          return "Ссылка устарела. Вернитесь в бот и создайте новую загрузку.";
+        }
+        if (error.code === "batch_archive_too_large") {
+          return "Архив слишком большой. Максимальный размер: 500 MB.";
+        }
+        return error.message;
+      }
+      return "Не удалось выполнить действие";
+    }
+
+    function money(value) {
+      const n = Number(value || 0);
+      return `$${n.toFixed(3).replace(/0+$/, "").replace(/\.$/, ".00")}`;
+    }
+
+    function duration(value) {
+      const n = Number(value || 0);
+      return `${Number.isInteger(n) ? n : n.toFixed(1)} сек`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    q480.addEventListener("click", () => setQuality("480p"));
+    q720.addEventListener("click", () => setQuality("720p"));
+    uploadArea.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
+    uploadArea.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      uploadArea.classList.add("dragover");
+    });
+    uploadArea.addEventListener("dragleave", () => uploadArea.classList.remove("dragover"));
+    uploadArea.addEventListener("drop", (event) => {
+      event.preventDefault();
+      uploadArea.classList.remove("dragover");
+      setFile(event.dataTransfer.files[0]);
+    });
+    mainButton.addEventListener("click", () => {
+      if (!selectedFile) {
+        fileInput.click();
+      } else if (!draft) {
+        createDraft();
+      } else {
+        confirmDraft();
+      }
+    });
+  </script>
+</body>
+</html>

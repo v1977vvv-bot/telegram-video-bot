@@ -14,6 +14,7 @@ from bot.app.keyboards.main_menu import (
     BATCH_GENERATION_BUTTONS,
     batch_generation_confirm_keyboard,
     batch_generation_quality_keyboard,
+    batch_web_upload_keyboard,
     cancel_keyboard,
     main_menu_keyboard,
     top_up_amounts_keyboard,
@@ -29,6 +30,7 @@ from bot.app.utils.text import safe_html
 
 router = Router()
 backend_client = BotBackendClient()
+TELEGRAM_DIRECT_ZIP_MAX_BYTES = 20 * 1024 * 1024
 
 
 class BatchGenerationStates(StatesGroup):
@@ -69,9 +71,32 @@ async def handle_batch_quality(callback: CallbackQuery, state: FSMContext) -> No
     await state.update_data(quality_profile=quality_profile)
     await state.set_state(BatchGenerationStates.waiting_for_zip)
     await callback.message.answer(  # type: ignore[union-attr]
-        f"Качество: {quality_profile}\n\n"
-        "Теперь загрузите .zip архив с парами фото и аудио.",
+        f"Качество: {quality_profile}\n\nТеперь загрузите .zip архив с парами фото и аудио.",
         reply_markup=cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "batch_web_upload")
+async def handle_batch_web_upload(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.from_user is None:
+        return
+    await state.clear()
+    try:
+        web_app_url = await backend_client.create_batch_upload_session(
+            telegram_id=callback.from_user.id,
+        )
+    except (BackendUnavailableError, BackendClientError):
+        await callback.message.answer(  # type: ignore[union-attr]
+            "Сервис временно недоступен.\n\nПопробуйте ещё раз немного позже."
+        )
+        await callback.answer()
+        return
+
+    await callback.message.answer(  # type: ignore[union-attr]
+        "Для больших архивов используйте прямую загрузку через Web App.\n\n"
+        "Там можно выбрать качество, загрузить .zip и сразу запустить пакет.",
+        reply_markup=batch_web_upload_keyboard(web_app_url),
     )
     await callback.answer()
 
@@ -85,9 +110,28 @@ async def handle_batch_zip(message: Message, state: FSMContext, bot: Bot) -> Non
     archive = _extract_zip_file(message)
     if archive is None:
         await message.answer(
-            "Нужно загрузить .zip архив документом.\n\n"
-            "Проверьте файл и отправьте архив ещё раз.",
+            "Нужно загрузить .zip архив документом.\n\nПроверьте файл и отправьте архив ещё раз.",
             reply_markup=cancel_keyboard(),
+        )
+        return
+
+    if archive.file_size is not None and archive.file_size > TELEGRAM_DIRECT_ZIP_MAX_BYTES:
+        try:
+            web_app_url = await backend_client.create_batch_upload_session(
+                telegram_id=message.from_user.id,
+            )
+        except (BackendUnavailableError, BackendClientError):
+            await message.answer(
+                "Архив слишком большой для загрузки через Telegram.\n\n"
+                "Сервис Web App временно недоступен. Попробуйте ещё раз немного позже.",
+                reply_markup=cancel_keyboard(),
+            )
+            return
+
+        await message.answer(
+            "Архив слишком большой для загрузки через Telegram.\n"
+            "Используйте загрузку через Web App.",
+            reply_markup=batch_web_upload_keyboard(web_app_url),
         )
         return
 
@@ -147,8 +191,7 @@ async def handle_batch_confirm(callback: CallbackQuery, state: FSMContext) -> No
         )
     except BackendPaymentRequiredError as exc:
         await callback.message.answer(  # type: ignore[union-attr]
-            f"{safe_html(exc, max_len=300)}\n\n"
-            "Пополните баланс одним из доступных пакетов.",
+            f"{safe_html(exc, max_len=300)}\n\nПополните баланс одним из доступных пакетов.",
             reply_markup=top_up_amounts_keyboard(),
         )
         await callback.answer()
@@ -160,8 +203,7 @@ async def handle_batch_confirm(callback: CallbackQuery, state: FSMContext) -> No
 
     await state.clear()
     await callback.message.answer(  # type: ignore[union-attr]
-        "✅ Пакетная генерация запущена.\n\n"
-        "Видео будут приходить по мере готовности.",
+        "✅ Пакетная генерация запущена.\n\nВидео будут приходить по мере готовности.",
         reply_markup=main_menu_keyboard(),
     )
     await callback.answer()
@@ -189,6 +231,7 @@ async def cancel_batch_generation_by_text(message: Message, state: FSMContext) -
 class TelegramZipFileInfo:
     file_id: str
     filename: str
+    file_size: int | None
 
 
 def _extract_zip_file(message: Message) -> TelegramZipFileInfo | None:
@@ -197,7 +240,11 @@ def _extract_zip_file(message: Message) -> TelegramZipFileInfo | None:
     filename = message.document.file_name or "batch.zip"
     if not filename.casefold().endswith(".zip"):
         return None
-    return TelegramZipFileInfo(file_id=message.document.file_id, filename=filename)
+    return TelegramZipFileInfo(
+        file_id=message.document.file_id,
+        filename=filename,
+        file_size=message.document.file_size,
+    )
 
 
 async def _download_telegram_file(bot: Bot, file_id: str) -> bytes:

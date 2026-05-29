@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from backend.app.api.admin_ui import router as admin_ui_router
 from backend.app.api.v1.router import api_router
@@ -20,6 +22,7 @@ from shared.app.logging import configure_logging, get_logger
 settings = get_settings()
 configure_logging(settings.log_level)
 logger = get_logger(__name__)
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 @asynccontextmanager
@@ -60,3 +63,8 @@ async def root_health() -> HealthResponse:
 
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(admin_ui_router)
+app.mount(
+    "/batch-upload",
+    StaticFiles(directory=STATIC_DIR / "batch_upload", html=True),
+    name="batch-upload",
+)

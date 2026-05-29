@@ -8,6 +8,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 
 from shared.app.config import get_settings
@@ -111,9 +112,23 @@ def batch_generation_quality_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="480p", callback_data="batch_quality:480p"),
             InlineKeyboardButton(text="720p", callback_data="batch_quality:720p"),
         ],
+        [InlineKeyboardButton(text="🌐 Загрузить большой архив", callback_data="batch_web_upload")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="batch_cancel")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def batch_web_upload_keyboard(web_app_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🌐 Загрузить большой архив",
+                    web_app=WebAppInfo(url=web_app_url),
+                )
+            ]
+        ]
+    )
 
 
 def batch_generation_confirm_keyboard(
