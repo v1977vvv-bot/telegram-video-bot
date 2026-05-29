@@ -36,6 +36,7 @@ from worker.app.services.balance import SyncBalanceService
 from worker.app.services.business_balance import SyncBusinessBalanceService
 from worker.app.services.comfyui_client import ComfyUIClient
 from worker.app.services.distributed_generation import DistributedSegmentGenerationService
+from worker.app.services.output_filenames import build_generation_output_filename
 from worker.app.services.runpod import NoGpuAvailableError, RunPodPoolFullError
 from worker.app.services.runpod_costs import RunPodCostService
 from worker.app.services.runpod_manager import ManagedComfyUIEndpoint, RunPodManager
@@ -911,7 +912,9 @@ def _job_quality_profile(job: GenerationJob) -> str:
 
 def _model_profile_for_quality(settings: Settings, quality_profile: str) -> str:
     if quality_profile == VideoQuality.P720.value:
-        return settings.runpod_720p_model_profile.strip() or settings.comfyui_model_profile_normalized
+        return (
+            settings.runpod_720p_model_profile.strip() or settings.comfyui_model_profile_normalized
+        )
     return settings.runpod_480p_model_profile.strip() or settings.comfyui_model_profile_normalized
 
 
@@ -1302,10 +1305,11 @@ def _complete_comfyui_job(
             if job.price_usd is None:
                 raise RuntimeError("Job price is missing")
 
+            result_filename = build_generation_output_filename(session, job)
             result_file = WorkerStorageService(session).save_file(
                 user_id=context.user_id,
                 file_type=FileType.VIDEO,
-                original_filename=f"comfyui-result-{job.id}.mp4",
+                original_filename=result_filename,
                 local_path=output_path,
                 mime_type="video/mp4",
             )

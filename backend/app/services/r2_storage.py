@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 from uuid import UUID
 
 import anyio
@@ -53,7 +54,7 @@ class R2StorageService:
                 Bucket=self._settings.cloudflare_r2_bucket,
                 Key=storage_key,
                 Body=content,
-                ContentType=mime_type or "application/octet-stream",
+                **_object_extra_args(mime_type, original_filename),
             )
         )
         return await self._create_uploaded_file(
@@ -80,7 +81,7 @@ class R2StorageService:
             mime_type=mime_type,
         )
         storage_key = build_storage_key(user_id, file_type, extension)
-        extra_args = {"ContentType": mime_type or "application/octet-stream"}
+        extra_args = _object_extra_args(mime_type, original_filename)
         await anyio.to_thread.run_sync(
             lambda: self._client.upload_file(
                 str(local_path),
@@ -108,13 +109,18 @@ class R2StorageService:
             return f"{public_base_url}/{uploaded_file.storage_key}"
 
         ttl = expires_in or self._settings.cloudflare_r2_presigned_url_ttl_seconds
+        params = {
+            "Bucket": self._settings.cloudflare_r2_bucket,
+            "Key": uploaded_file.storage_key,
+        }
+        if uploaded_file.original_filename:
+            params["ResponseContentDisposition"] = _content_disposition(
+                uploaded_file.original_filename
+            )
         return str(
             self._client.generate_presigned_url(
                 "get_object",
-                Params={
-                    "Bucket": self._settings.cloudflare_r2_bucket,
-                    "Key": uploaded_file.storage_key,
-                },
+                Params=params,
                 ExpiresIn=ttl,
             )
         )
@@ -167,3 +173,16 @@ class R2StorageService:
         self._session.add(uploaded_file)
         await self._session.flush()
         return uploaded_file
+
+
+def _content_disposition(filename: str) -> str:
+    ascii_filename = filename.encode("ascii", "ignore").decode() or "video.mp4"
+    ascii_filename = ascii_filename.replace("\\", "").replace('"', "")
+    return f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+def _object_extra_args(mime_type: str | None, original_filename: str | None) -> dict[str, str]:
+    extra_args = {"ContentType": mime_type or "application/octet-stream"}
+    if original_filename:
+        extra_args["ContentDisposition"] = _content_disposition(original_filename)
+    return extra_args

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from shutil import copyfile
+from urllib.parse import quote
 from uuid import UUID
 
 import boto3
@@ -40,7 +41,7 @@ class WorkerStorageService:
         if provider == StorageProvider.LOCAL.value:
             self._save_local(storage_key, content)
         elif provider == StorageProvider.CLOUDFLARE_R2.value:
-            self._save_r2(storage_key, content, mime_type)
+            self._save_r2(storage_key, content, mime_type, original_filename)
         else:
             raise RuntimeError(f"Unsupported storage provider: {provider}")
 
@@ -83,7 +84,7 @@ class WorkerStorageService:
                 str(local_path),
                 self._settings.cloudflare_r2_bucket,
                 storage_key,
-                ExtraArgs={"ContentType": mime_type or "application/octet-stream"},
+                ExtraArgs=_object_extra_args(mime_type, original_filename),
             )
         else:
             raise RuntimeError(f"Unsupported storage provider: {provider}")
@@ -146,13 +147,18 @@ class WorkerStorageService:
                 return f"{public_base_url}/{uploaded_file.storage_key}"
 
             ttl = expires_in or self._settings.cloudflare_r2_presigned_url_ttl_seconds
+            params = {
+                "Bucket": self._settings.cloudflare_r2_bucket,
+                "Key": uploaded_file.storage_key,
+            }
+            if uploaded_file.original_filename:
+                params["ResponseContentDisposition"] = _content_disposition(
+                    uploaded_file.original_filename
+                )
             return str(
                 self._r2_client().generate_presigned_url(
                     "get_object",
-                    Params={
-                        "Bucket": self._settings.cloudflare_r2_bucket,
-                        "Key": uploaded_file.storage_key,
-                    },
+                    Params=params,
                     ExpiresIn=ttl,
                 )
             )
@@ -164,12 +170,18 @@ class WorkerStorageService:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
-    def _save_r2(self, storage_key: str, content: bytes, mime_type: str | None) -> None:
+    def _save_r2(
+        self,
+        storage_key: str,
+        content: bytes,
+        mime_type: str | None,
+        original_filename: str | None,
+    ) -> None:
         self._r2_client().put_object(
             Bucket=self._settings.cloudflare_r2_bucket,
             Key=storage_key,
             Body=content,
-            ContentType=mime_type or "application/octet-stream",
+            **_object_extra_args(mime_type, original_filename),
         )
 
     def _local_path(self, storage_key: str) -> Path:
@@ -183,3 +195,16 @@ class WorkerStorageService:
             aws_secret_access_key=self._settings.cloudflare_r2_secret_access_key,
             region_name="auto",
         )
+
+
+def _content_disposition(filename: str) -> str:
+    ascii_filename = filename.encode("ascii", "ignore").decode() or "video.mp4"
+    ascii_filename = ascii_filename.replace("\\", "").replace('"', "")
+    return f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+def _object_extra_args(mime_type: str | None, original_filename: str | None) -> dict[str, str]:
+    extra_args = {"ContentType": mime_type or "application/octet-stream"}
+    if original_filename:
+        extra_args["ContentDisposition"] = _content_disposition(original_filename)
+    return extra_args
